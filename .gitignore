@@ -1,0 +1,71 @@
+# =============================================================
+# Python
+# =============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# =============================================================
+# uv / tooling
+# =============================================================
+# uv.lock is intentionally committed for reproducibility
+# .python-version is intentionally committed
+
+# =============================================================
+# Environment & secrets
+# =============================================================
+.env
+.env.*
+!.env.example
+
+# =============================================================
+# ML model cache (large, downloaded at runtime)
+# =============================================================
+# HuggingFace cache lives in ~/.cache/huggingface by default
+# If you override HF_HOME to a local path, add it here:
+# models/
+
+# =============================================================
+# Media files — keep folder structure, ignore contents
+# =============================================================
+/input/*
+!/input/.gitkeep
+
+/audio/*
+!/audio/.gitkeep
+
+/transcripts/*
+!/transcripts/.gitkeep
+
+/summaries/*
+!/summaries/.gitkeep
+
+# =============================================================
+# OS / editor
+# =============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# =============================================================
+# Claude Code
+# =============================================================
+.claude/
