@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import config
 
 import imageio_ffmpeg
 import numpy as np
@@ -78,7 +79,7 @@ USER_PROMPT_TEMPLATE = """\
 (언급된 기술 스택, 모델, 데이터, 성능 수치 등 구체적 사실 정리)
 
 ### 인상적인 인사이트 / 시사점
-(기억할 만한 관점, 흥미로운 주장, 업계 트렌드 관련 내용)
+(기억할 만한 관점, 흥미로운 주장, 시험에 나올 만한 내용)
 
 ### 질의응답 주요 내용
 (청중 질문과 답변 중 중요한 내용 정리, 없으면 생략)
@@ -309,6 +310,8 @@ def _pick_summarize() -> bool:
 
 
 def main() -> None:
+    config.setup_gpu()
+
     parser = argparse.ArgumentParser(description="동영상/음성 → 텍스트 전사 파이프라인")
     parser.add_argument("file", nargs="?", help="변환할 파일명 (생략 시 input/audio/ 목록에서 선택)")
     parser.add_argument(
