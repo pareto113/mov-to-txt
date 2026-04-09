@@ -5,10 +5,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ENV_MODE = os.getenv("ENV_MODE", "local")
+GPU_INDEX: int = 0
 
 
 def setup_gpu() -> None:
-    """B환경(server)에서만 호출. GPU 인덱스를 사용자로부터 입력받아 환경변수를 설정한다."""
+    """서버 환경(server)에서만 호출. GPU 인덱스를 사용자로부터 입력받아 설정한다."""
+    global GPU_INDEX
+
     if ENV_MODE != "server":
         return
 
@@ -23,10 +26,8 @@ def setup_gpu() -> None:
             sys.exit(0)
 
         if raw.isdigit() and 0 <= int(raw) <= 7:
-            gpu_index = raw
+            GPU_INDEX = int(raw)
             break
         print("  0~7 사이의 정수를 입력하세요.")
 
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_index
-    print(f"[Step 0] GPU 설정 완료: CUDA_VISIBLE_DEVICES={gpu_index}\n")
+    print(f"[Step 0] GPU 설정 완료: cuda:{GPU_INDEX}\n")

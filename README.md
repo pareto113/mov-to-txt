@@ -60,11 +60,34 @@ uv run convert.py --all-audio
 uv run convert.py --all-audio --summarize --language ko
 ```
 
+## 환경 설정 (`.env`)
+
+프로젝트 루트의 `.env` 파일로 실행 환경을 전환합니다.
+
+### A환경 — 로컬 그래픽카드
+
+```dotenv
+ENV_MODE=local
+ANTHROPIC_API_KEY=sk-ant-...   # --summarize 사용 시 필요
+```
+
+### B환경 — 서버 그래픽카드
+
+```dotenv
+ENV_MODE=server
+ANTHROPIC_API_KEY=sk-ant-...   # --summarize 사용 시 필요
+```
+
+`ENV_MODE=server`로 설정하면 실행 시 **Step 0** 에서 사용할 GPU 인덱스(0~7)를 입력하는 프롬프트가 나타납니다.  
+입력한 값은 `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES=<인덱스>`로 자동 적용됩니다.
+
 ## 디렉토리 구조
 
 ```
 mov-to-txt/
 ├── convert.py          # 메인 스크립트
+├── config.py           # 환경 감지 및 GPU 설정
+├── .env                # 환경 변수 (ENV_MODE, ANTHROPIC_API_KEY)
 ├── pyproject.toml      # 의존성 정의
 ├── uv.lock             # 잠금 파일 (재현 가능한 환경)
 ├── input/              # 원본 영상/음성 파일을 여기에 넣으세요
@@ -74,18 +97,6 @@ mov-to-txt/
 ```
 
 > `input/`, `audio/`, `transcripts/`, `summaries/` 폴더의 내용물은 `.gitignore`에 의해 추적되지 않습니다.
-
-## Claude API 요약 설정
-
-`--summarize` 사용 시 `ANTHROPIC_API_KEY` 환경변수가 필요합니다.
-
-```bash
-# Windows
-set ANTHROPIC_API_KEY=sk-ant-...
-
-# macOS/Linux
-export ANTHROPIC_API_KEY=sk-ant-...
-```
 
 ## 출력 형식
 

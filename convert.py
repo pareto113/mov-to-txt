@@ -46,6 +46,8 @@ MOONSHINE_MODELS = {
 }
 MOONSHINE_CHUNK_SECONDS = 30
 
+FASTER_WHISPER_MODEL = "large-v3"
+
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -136,10 +138,10 @@ def extract_audio(video_path: Path, audio_dir: Path) -> Path:
 
 
 # ─────────────────────────────────────────────
-# Step 2: 음성 인식 — Moonshine Tiny Korean
+# Step 2: 음성 인식
 # ─────────────────────────────────────────────
 
-def transcribe(audio_path: Path, transcript_dir: Path, name: str, language: str = "ko") -> Path:
+def _transcribe_moonshine(audio_path: Path, transcript_dir: Path, name: str, language: str = "ko") -> Path:
     transcript_dir.mkdir(parents=True, exist_ok=True)
     txt_path = transcript_dir / (name + ".txt")
     json_path = transcript_dir / (name + ".json")
@@ -149,7 +151,7 @@ def transcribe(audio_path: Path, transcript_dir: Path, name: str, language: str 
         return txt_path
 
     model_id = MOONSHINE_MODELS[language]
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = f"cuda:{config.GPU_INDEX}" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     print(f"[Step 2] Moonshine 모델 로드 중: {model_id}")
@@ -200,6 +202,68 @@ def transcribe(audio_path: Path, transcript_dir: Path, name: str, language: str 
     print(f"[Step 2] JSON 저장: {json_path}")
 
     return txt_path
+
+
+def _transcribe_faster_whisper(audio_path: Path, transcript_dir: Path, name: str, language: str = "ko") -> Path:
+    from faster_whisper import WhisperModel
+
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = transcript_dir / (name + ".txt")
+    json_path = transcript_dir / (name + ".json")
+
+    if txt_path.exists():
+        print(f"[Step 2] 건너뜀 (이미 존재): {txt_path}")
+        return txt_path
+
+    cuda_available = torch.cuda.is_available()
+    device = "cuda" if cuda_available else "cpu"
+    device_index = config.GPU_INDEX if cuda_available else 0
+    compute_type = "float16" if cuda_available else "float32"
+
+    print(f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cuda:{device_index}, {compute_type})" if cuda_available else f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cpu, {compute_type})")
+    model = WhisperModel(FASTER_WHISPER_MODEL, device=device, device_index=device_index, compute_type=compute_type)
+
+    print(f"[Step 2] 전사 중: {audio_path}")
+    fw_segments, info = model.transcribe(str(audio_path), language=language, beam_size=5)
+    print(f"[Step 2] 감지 언어: {info.language} (확률 {info.language_probability:.2f})")
+
+    segments = []
+    lines = [f"# {name} 전사본\n"]
+    total = 0
+
+    for seg in fw_segments:
+        start_fmt = _format_timestamp(seg.start)
+        end_fmt = _format_timestamp(seg.end)
+        text = seg.text.strip()
+        if text:
+            lines.append(f"[{start_fmt} --> {end_fmt}]  {text}")
+            segments.append({"start": seg.start, "end": seg.end, "text": text})
+            total += 1
+        print(f"\r[Step 2] 세그먼트 {total}개 처리 중... ({start_fmt})", end="", flush=True)
+
+    print()
+
+    txt_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[Step 2] TXT 저장: {txt_path}")
+
+    json_data = {"language": language, "segments": segments}
+    json_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[Step 2] JSON 저장: {json_path}")
+
+    return txt_path
+
+
+def transcribe(audio_path: Path, transcript_dir: Path, name: str, language: str = "ko", engine: str = "moonshine") -> Path:
+    import time
+    t0 = time.perf_counter()
+    if engine == "faster-whisper":
+        result = _transcribe_faster_whisper(audio_path, transcript_dir, name, language)
+    else:
+        result = _transcribe_moonshine(audio_path, transcript_dir, name, language)
+    elapsed = time.perf_counter() - t0
+    m, s = divmod(int(elapsed), 60)
+    print(f"[Step 2] 소요시간: {m}분 {s}초 ({elapsed:.1f}초)")
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -291,6 +355,19 @@ def _pick_input_file(input_dir: Path, audio_dir: Path) -> Path:
             print(f"  '{choice}' 파일을 찾을 수 없습니다.")
 
 
+def _pick_engine() -> str:
+    print("\n모델 선택:")
+    print("  [1] Moonshine Tiny  — 경량, 한국어(ko) / 영어(en) 별도 모델")
+    print("  [2] faster-whisper large-v3  — 고정밀, 다국어 지원")
+    while True:
+        choice = _prompt("번호 입력 (Enter = 1): ")
+        if choice in ("", "1", "moonshine"):
+            return "moonshine"
+        if choice in ("2", "faster-whisper"):
+            return "faster-whisper"
+        print("  1 또는 2를 입력하세요.")
+
+
 def _pick_language() -> str:
     print("\n언어 선택:")
     print("  [1] ko — 한국어 (기본값)")
@@ -332,6 +409,12 @@ def main() -> None:
         default="ko",
         help="전사 언어 (ko: 한국어, en: 영어, 기본값: ko)",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["moonshine", "faster-whisper"],
+        default="moonshine",
+        help="음성 인식 엔진 (moonshine: 경량, faster-whisper: 고정밀, 기본값: moonshine)",
+    )
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -352,7 +435,7 @@ def main() -> None:
         print(f"[배치] audio/ 폴더에서 {len(batch_files)}개 파일을 전사합니다.")
         for audio_file in batch_files:
             print(f"\n[배치] 처리 중: {audio_file.name}")
-            txt_path = transcribe(audio_file, transcript_dir, audio_file.stem, language=args.language)
+            txt_path = transcribe(audio_file, transcript_dir, audio_file.stem, language=args.language, engine=args.engine)
             if args.summarize:
                 summarize(txt_path, summary_dir, audio_file.stem)
         print("\n모든 파일 완료.")
@@ -361,6 +444,7 @@ def main() -> None:
     # 파일 결정
     if args.file is None:
         input_path = _pick_input_file(input_dir, audio_dir)
+        args.engine = _pick_engine()
         args.language = _pick_language()
         args.summarize = _pick_summarize()
     else:
@@ -390,7 +474,7 @@ def main() -> None:
         audio_path = extract_audio(input_path, audio_dir)
 
     # Step 2
-    txt_path = transcribe(audio_path, transcript_dir, name, language=args.language)
+    txt_path = transcribe(audio_path, transcript_dir, name, language=args.language, engine=args.engine)
 
     # Step 3 (optional)
     if args.summarize:

@@ -10,6 +10,7 @@ dependencies = [
     "transformers>=4.50.0",
     "accelerate",
     "dotenv>=0.9.9",
+    "faster-whisper>=1.0.0",
 ]
 
 [tool.uv.sources]
