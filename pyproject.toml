@@ -9,6 +9,7 @@ dependencies = [
     "torch>=2.5.0",
     "transformers>=4.50.0",
     "accelerate",
+    "dotenv>=0.9.9",
 ]
 
 [tool.uv.sources]
