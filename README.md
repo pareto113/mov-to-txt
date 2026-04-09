@@ -8,11 +8,20 @@
 
 ## 특징
 
-- **오프라인 전사**: [Moonshine Tiny Korean](https://huggingface.co/UsefulSensors/moonshine-tiny-ko) 모델로 로컬에서 음성 인식 (GPU 가속)
+- **오프라인 전사**: `moonshine-tiny` / `faster-whisper` 2가지 로컬 음성 인식 엔진 중 선택 (GPU 가속)
 - **다국어 지원**: 한국어(`ko`) / 영어(`en`) 선택 가능
 - **일괄 처리**: `--all-audio` 플래그로 `audio/` 폴더 전체 배치 전사
 - **AI 요약**: `--summarize` 플래그로 Claude API를 통한 구조화된 한국어 요약 생성
 - **스킵 로직**: 이미 생성된 파일은 건너뛰어 중복 작업 방지
+
+## 음성 인식 엔진
+
+`--engine` 플래그 또는 대화형 모드의 프롬프트로 선택합니다.
+
+| 엔진 | 모델 | 특징 | 언어 |
+|------|------|------|------|
+| `moonshine` (기본값) | [Moonshine Tiny Korean](https://huggingface.co/UsefulSensors/moonshine-tiny-ko) / [Moonshine Tiny](https://huggingface.co/UsefulSensors/moonshine-tiny) | 경량, 빠른 속도 | ko / en 별도 모델 |
+| `faster-whisper` | [Whisper large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) | 고정밀, 다국어 지원 | ko / en 동일 모델 |
 
 ## 요구사항
 
@@ -43,11 +52,14 @@ uv run convert.py
 ### 파일 지정 실행
 
 ```bash
-# input/ 폴더의 파일 전사 (한국어)
+# input/ 폴더의 파일 전사 (한국어, moonshine 기본)
 uv run convert.py lecture.mp4
 
 # 영어 전사
 uv run convert.py lecture.mp4 --language en
+
+# faster-whisper 엔진 사용 (고정밀)
+uv run convert.py lecture.mp4 --engine faster-whisper
 
 # 전사 + Claude 요약
 uv run convert.py lecture.mp4 --summarize
@@ -57,6 +69,7 @@ uv run convert.py lecture.mp4 --summarize
 
 ```bash
 uv run convert.py --all-audio
+uv run convert.py --all-audio --engine faster-whisper --language ko
 uv run convert.py --all-audio --summarize --language ko
 ```
 
