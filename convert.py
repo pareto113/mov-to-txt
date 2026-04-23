@@ -218,7 +218,13 @@ def _transcribe_faster_whisper(audio_path: Path, transcript_dir: Path, name: str
     cuda_available = torch.cuda.is_available()
     device = "cuda" if cuda_available else "cpu"
     device_index = config.GPU_INDEX if cuda_available else 0
-    compute_type = "float16" if cuda_available else "float32"
+    
+    # faster-whisper는 GPU 아키텍처에 따라 float16 또는 int8 연산을 자동으로 선택하지만, 너무 낮은 버전에서는 int8을 사용해야 함
+    if cuda_available:
+        cap = torch.cuda.get_device_capability(device_index)
+        compute_type = "float16" if cap[0] >= 7 else "int8_float32"
+    else:
+        compute_type = "int8"
 
     print(f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cuda:{device_index}, {compute_type})" if cuda_available else f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cpu, {compute_type})")
     model = WhisperModel(FASTER_WHISPER_MODEL, device=device, device_index=device_index, compute_type=compute_type)
