@@ -1,16 +1,22 @@
 [project]
 name = "mov-to-txt"
 version = "0.1.0"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "anthropic>=0.84.0",
     "imageio-ffmpeg>=0.6.0",
     "numpy",
     "torch>=2.5.0",
-    "transformers>=4.50.0",
+    "transformers>=5.22.2",
     "accelerate",
     "dotenv>=0.9.9",
     "faster-whisper>=1.0.0",
+    "fastapi>=0.162.5",
+    "uvicorn>=0.54.0",
+    "python-multipart>=0.0.32",
+    "soynlp>=0.0.493",
+    "yt-dlp[default]>=2026.10.26",
+    "deno>=2.9.8",
 ]
 
 [tool.uv.sources]

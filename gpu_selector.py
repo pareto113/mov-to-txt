@@ -12,29 +12,26 @@ GPU 선택 보일러플레이트 — 다른 프로젝트에 이 파일만 복사
 환경변수:
     ENV_MODE=server  → 실행 시 GPU 인덱스 입력 프롬프트 표시
     ENV_MODE=local   → GPU_INDEX=0 기본값 사용 (기본값)
-    GPU_INDEX=2      → 프롬프트 없이 인덱스 고정 (server 모드에서도 우선 적용)
 """
 
 import os
 import sys
 
+from dotenv import load_dotenv
+load_dotenv()
+
 ENV_MODE: str = os.getenv("ENV_MODE", "local")
-_GPU_INDEX: int = int(os.getenv("GPU_INDEX", "0"))
+_GPU_INDEX: int = 0
 
 
 def setup(max_index: int = 7) -> None:
     """서버 환경에서 GPU 인덱스를 대화형으로 선택한다.
 
-    GPU_INDEX 환경변수가 이미 지정된 경우에는 프롬프트를 건너뛴다.
     로컬 환경(ENV_MODE != 'server')에서는 아무 동작도 하지 않는다.
     """
     global _GPU_INDEX
 
     if ENV_MODE != "server":
-        return
-
-    if "GPU_INDEX" in os.environ:
-        print(f"[GPU] GPU_INDEX={_GPU_INDEX} (환경변수 고정)\n")
         return
 
     print(f"[GPU] 서버 환경(ENV_MODE=server) 감지됨.")
@@ -53,6 +50,37 @@ def setup(max_index: int = 7) -> None:
         print(f"  0~{max_index} 사이의 정수를 입력하세요.")
 
     print(f"[GPU] 설정 완료: cuda:{_GPU_INDEX}\n")
+
+
+def set_index(idx: int) -> None:
+    """GPU 인덱스를 프로그램적으로 지정한다 (웹 UI 등 비대화형 환경용)."""
+    global _GPU_INDEX
+    _GPU_INDEX = int(idx)
+
+
+def list_gpus() -> list[dict]:
+    """사용 가능한 CUDA GPU 목록을 반환한다. [{index, name, memory_gb}]"""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return []
+        result = []
+        for i in range(torch.cuda.device_count()):
+            try:
+                props = torch.cuda.get_device_properties(i)
+                result.append({
+                    "index": i,
+                    "name": props.name,
+                    "memory_gb": round(props.total_memory / 1024**3, 1),
+                    "capability": f"{props.major}.{props.minor}",
+                    # Volta(7.0) 미만은 float16/bfloat16 연산이 사실상 불가 → 사용 제외
+                    "supported": props.major >= 7,
+                })
+            except Exception:
+                continue
+        return result
+    except ImportError:
+        return []
 
 
 def index() -> int:

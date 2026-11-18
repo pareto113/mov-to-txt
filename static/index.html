@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mov-to-txt</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1c1f24; --muted: #6b7280; --border: #e3e6ea;
+    --accent: #2f6fed; --accent-text: #fff; --ok: #1a8f4c; --err: #d03a3a; --warn: #b7791f;
+    --chip: #eef1f5; --log-bg: #0f1216; --log-text: #d6dde6; --row-hover: #f2f5fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --panel: #191d23; --text: #e6e9ee; --muted: #8b95a3; --border: #2a3039;
+      --accent: #5b8cff; --accent-text: #0b0e12; --ok: #3ec27a; --err: #ff6b6b; --warn: #e3b04b;
+      --chip: #242a33; --log-bg: #0a0c0f; --log-text: #c9d1dc; --row-hover: #1f242c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: baseline; gap: 12px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px 24px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .panel h2 { font-size: 14px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .panel .body { padding: 12px 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; }
+  tbody tr:hover { background: var(--row-hover); }
+  tbody tr { cursor: pointer; }
+  td.name { word-break: break-all; }
+  td.num { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .chip.ok { color: var(--ok); } .chip.err { color: var(--err); } .chip.run { color: var(--accent); } .chip.warn { color: var(--warn); }
+  button, .btn { font: inherit; border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    padding: 6px 12px; border-radius: 7px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; width: 100%; padding: 10px; }
+  button.primary:disabled { opacity: .45; cursor: not-allowed; }
+  button.link { border: 0; background: none; color: var(--accent); padding: 0 4px; }
+  label.opt { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  select { width: 100%; font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  .seg { display: flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .seg label { flex: 1; text-align: center; padding: 7px 4px; cursor: pointer; font-size: 13px; }
+  .seg input { display: none; }
+  .seg label:has(input:checked) { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 13px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .drop { border: 1.5px dashed var(--border); border-radius: 8px; padding: 14px; text-align: center; color: var(--muted); margin-bottom: 12px; font-size: 13px; }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  .progress { height: 4px; background: var(--chip); border-radius: 2px; overflow: hidden; margin-top: 6px; display: none; }
+  .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .jobs { grid-column: 1 / -1; }
+  .job { border-bottom: 1px solid var(--border); padding: 10px 16px; }
+  .job:last-child { border-bottom: 0; }
+  .job .top { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .job .fname { font-weight: 600; word-break: break-all; }
+  .job .meta { color: var(--muted); font-size: 12px; }
+  .job .actions { margin-left: auto; display: flex; gap: 4px; }
+  pre.log { background: var(--log-bg); color: var(--log-text); padding: 10px 12px; border-radius: 6px; margin: 8px 0 0;
+    max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  .empty { color: var(--muted); padding: 16px; text-align: center; }
+  dialog { border: 1px solid var(--border); border-radius: 10px; padding: 0; width: min(900px, 94vw); max-height: 88vh;
+    background: var(--panel); color: var(--text); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog .head { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  dialog .head strong { flex: 1; word-break: break-all; }
+  dialog pre { margin: 0; padding: 16px; overflow: auto; max-height: calc(88vh - 56px); white-space: pre-wrap; word-break: break-word;
+    font: 13px/1.65 ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans KR", monospace; }
+  .toolbar { display: flex; gap: 6px; align-items: center; font-weight: normal; }
+  .yt { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .yt-row { display: flex; gap: 6px; }
+  .yt-row input { flex: 1; min-width: 0; font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); }
+  .yt-title { font-weight: 600; margin-top: 12px; word-break: break-all; }
+  .yt-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .yt-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; margin-top: 8px; }
+  .yt-list label { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; }
+  .yt-list label:last-child { border-bottom: 0; }
+  .yt-list .t { flex: 1; word-break: break-all; }
+  .yt-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; align-items: end; }
+  @media (max-width: 600px) { .yt-opts { grid-template-columns: 1fr; } }
+  .yt button.primary { margin-top: 12px; }
+  .chip.yt-tag { color: var(--err); }
+  tbody tr.disabled { cursor: default; }
+  .toolbar input[type=search] { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); width: 160px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mov-to-txt</h1>
+  <span>동영상/음성 → 텍스트 전사 · 요약</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>
+      <span>파일 <span id="selCount" class="chip">0개 선택</span></span>
+      <span class="toolbar">
+        <input type="search" id="filter" placeholder="파일명 검색">
+        <button id="refresh" title="새로고침">↻</button>
+      </span>
+    </h2>
+    <div class="body">
+      <div class="yt">
+        <form class="yt-row" id="ytForm">
+          <input type="url" id="ytUrl" placeholder="YouTube 영상 또는 재생목록 URL" required>
+          <button id="ytLoad" type="submit">불러오기</button>
+        </form>
+        <div id="ytResult" hidden>
+          <div id="ytInfo"></div>
+          <div class="yt-opts">
+            <div>
+              <label class="opt">YouTube 자막</label>
+              <div class="seg" id="ytSubs">
+                <label title="자막을 쓰지 않고 오디오를 내려받아 음성 인식"><input type="radio" name="ytSubs" value="off" checked>사용 안 함</label>
+                <label title="업로더가 직접 올린 자막만 사용"><input type="radio" name="ytSubs" value="manual">업로더 자막</label>
+                <label title="업로더 자막이 없으면 YouTube 자동 생성 자막도 사용"><input type="radio" name="ytSubs" value="any">자동 생성 포함</label>
+              </div>
+            </div>
+            <div>
+              <label class="opt" for="ytEngine">음성 인식 엔진</label>
+              <select id="ytEngine"></select>
+            </div>
+          </div>
+          <div class="hint" id="ytHint"></div>
+          <button class="primary" id="ytStart">YouTube 작업 추가</button>
+          <div class="hint">언어·GPU·요약·덮어쓰기는 변환 옵션을 따릅니다</div>
+        </div>
+      </div>
+      <div class="drop" id="drop">
+        여기로 파일을 끌어다 놓거나 <button class="link" id="pickBtn">파일 선택</button>
+        <input type="file" id="fileInput" multiple hidden>
+        <div class="hint">영상은 input/, 음성은 audio/ 폴더에 저장됩니다</div>
+        <div class="progress" id="upProg"><div></div></div>
+      </div>
+      <table>
+        <thead><tr>
+          <th style="width:28px"><input type="checkbox" id="checkAll"></th>
+          <th>파일명</th><th>폴더</th><th>크기</th><th>결과</th>
+        </tr></thead>
+        <tbody id="files"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <h2>변환 옵션</h2>
+    <div class="body">
+      <label class="opt">음성 인식 엔진</label>
+      <div class="seg" id="engineSeg"></div>
+      <div class="hint" id="engineHint"></div>
+
+      <label class="opt">언어</label>
+      <div class="seg">
+        <label><input type="radio" name="lang" value="ko" checked>한국어</label>
+        <label><input type="radio" name="lang" value="en">영어</label>
+      </div>
+
+      <label class="opt" for="gpu">GPU</label>
+      <select id="gpu"></select>
+
+      <label class="check"><input type="checkbox" id="summarize"> Claude API로 요약본 생성</label>
+      <div class="hint" id="apiHint"></div>
+      <label class="check"><input type="checkbox" id="overwrite"> 기존 결과 덮어쓰기</label>
+      <div class="hint">끄면 이미 전사된 파일은 건너뜁니다</div>
+
+      <div style="margin-top:16px"><button class="primary" id="start" disabled>변환 시작</button></div>
+    </div>
+  </aside>
+
+  <section class="panel jobs">
+    <h2><span>작업</span><button id="clearDone">완료된 작업 지우기</button></h2>
+    <div id="jobs"><div class="empty">아직 작업이 없습니다</div></div>
+  </section>
+</main>
+
+<dialog id="viewer">
+  <div class="head">
+    <strong id="vTitle"></strong>
+    <a class="btn" id="vDownload" href="#" style="text-decoration:none">다운로드</a>
+    <button id="vCopy">복사</button>
+    <button id="vClose">닫기</button>
+  </div>
+  <pre id="vBody"></pre>
+</dialog>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { files: [], selected: new Set(), jobs: [], openLogs: new Set(), config: null };
+const key = (f) => `${f.folder}/${f.name}`;
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtSize(b) { const u = ['B','KB','MB','GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; }
+function fmtDur(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m}분 ${s % 60}초` : `${s}초`; }
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).detail || msg; } catch {} throw new Error(msg); }
+  return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
+}
+
+// ── 설정 ──
+async function loadConfig() {
+  const c = state.config = await api('/api/config');
+  $('#engineSeg').innerHTML = c.engines.map((e, i) =>
+    `<label title="${esc(e.desc)}"><input type="radio" name="engine" value="${e.id}" ${e.id === c.default_engine ? 'checked' : ''}>${esc(e.label)}</label>`).join('');
+  const updHint = () => { const e = c.engines.find(x => x.id === document.querySelector('[name=engine]:checked').value); $('#engineHint').textContent = e.desc; };
+  $('#engineSeg').addEventListener('change', updHint); updHint();
+  const saved = localStorage.getItem('gpu');
+  $('#gpu').innerHTML = c.gpus.length
+    ? c.gpus.map(g => `<option value="${g.index}" ${g.supported ? '' : 'disabled'}>cuda:${g.index} — ${esc(g.name)} (${g.memory_gb}GB)${g.supported ? '' : ' · 지원 안 함'}</option>`).join('')
+    : '<option value="0">CPU (CUDA 없음)</option>';
+  const usable = [...$('#gpu').options].filter(o => !o.disabled);
+  if (saved !== null && usable.some(o => o.value === saved)) $('#gpu').value = saved;
+  else if (usable.length) $('#gpu').value = usable[0].value;
+  $('#gpu').title = 'Compute Capability 7.0 미만 GPU(TITAN Xp 등)는 float16/bfloat16을 지원하지 않아 선택할 수 없습니다';
+  $('#gpu').addEventListener('change', () => localStorage.setItem('gpu', $('#gpu').value));
+  if (!c.has_api_key) { $('#summarize').disabled = true; $('#apiHint').textContent = '.env에 ANTHROPIC_API_KEY가 없어 사용할 수 없습니다'; }
+  // YouTube 패널: 기본 엔진에서 시작, 마지막 선택은 기억
+  $('#ytEngine').innerHTML = c.engines.map(e => `<option value="${e.id}">${esc(e.label)}</option>`).join('');
+  $('#ytEngine').value = lsGet('ytEngine') || c.default_engine;
+  if (!$('#ytEngine').value) $('#ytEngine').value = c.default_engine;
+  const subs = lsGet('ytSubs'); if (subs) { const r = document.querySelector(`[name=ytSubs][value="${subs}"]`); if (r) r.checked = true; }
+}
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+const CAPTION = { manual: '업로더 자막', auto: '자동 생성 자막' };
+const captionChip = (c) => c ? `<span class="chip ${c === 'auto' ? 'warn' : 'ok'}" title="YouTube ${CAPTION[c]}으로 만든 전사본">자막·${c === 'auto' ? '자동 생성' : '업로더'}</span>` : '';
+
+// ── 파일 목록 ──
+async function loadFiles() {
+  state.files = await api('/api/files');
+  const valid = new Set(state.files.map(key));
+  for (const k of [...state.selected]) if (!valid.has(k)) state.selected.delete(k);
+  renderFiles();
+}
+function renderFiles() {
+  const q = $('#filter').value.trim().toLowerCase();
+  const list = state.files.filter(f => !q || f.name.toLowerCase().includes(q));
+  $('#files').innerHTML = list.length ? list.map(f => {
+    const k = key(f);
+    const sel = f.selectable !== false;
+    const res = [
+      f.has_transcript ? `<button class="link" data-view="txt" data-stem="${esc(f.stem)}">전사본</button>` : '',
+      f.has_summary ? `<button class="link" data-view="md" data-stem="${esc(f.stem)}">요약</button>` : '',
+      captionChip(f.caption),
+    ].join('') || '<span class="chip">미변환</span>';
+    return `<tr data-key="${esc(k)}" class="${sel ? '' : 'disabled'}">
+      <td><input type="checkbox" ${state.selected.has(k) ? 'checked' : ''} ${sel ? '' : 'disabled title="자막으로 만든 전사본은 원본 파일이 없어 다시 변환하려면 YouTube URL로 추가하세요"'}></td>
+      <td class="name">${esc(f.name)}</td>
+      <td><span class="chip ${f.folder === 'youtube' ? 'yt-tag' : ''}">${f.folder}/</span></td>
+      <td class="num">${f.size == null ? '' : fmtSize(f.size)}</td>
+      <td>${res}</td></tr>`;
+  }).join('') : `<tr><td colspan="5" class="empty">${q ? '검색 결과 없음' : 'input/ 또는 audio/ 폴더에 파일이 없습니다'}</td></tr>`;
+  // 자막으로 만든 YouTube 전사본은 선택 대상이 아님
+  for (const f of state.files) if (f.selectable === false) state.selected.delete(key(f));
+  const selectable = list.filter(f => f.selectable !== false);
+  $('#checkAll').checked = selectable.length > 0 && selectable.every(f => state.selected.has(key(f)));
+  updSel();
+}
+function updSel() {
+  $('#selCount').textContent = `${state.selected.size}개 선택`;
+  $('#start').disabled = state.selected.size === 0;
+  $('#start').textContent = state.selected.size > 1 ? `${state.selected.size}개 파일 변환 시작` : '변환 시작';
+}
+$('#files').addEventListener('click', (e) => {
+  const v = e.target.closest('[data-view]');
+  if (v) { e.stopPropagation(); return openViewer(v.dataset.view, v.dataset.stem); }
+  const tr = e.target.closest('tr[data-key]'); if (!tr || tr.classList.contains('disabled')) return;
+  const k = tr.dataset.key;
+  state.selected.has(k) ? state.selected.delete(k) : state.selected.add(k);
+  renderFiles();
+});
+$('#checkAll').addEventListener('change', (e) => {
+  const q = $('#filter').value.trim().toLowerCase();
+  for (const f of state.files) if (f.selectable !== false && (!q || f.name.toLowerCase().includes(q))) e.target.checked ? state.selected.add(key(f)) : state.selected.delete(key(f));
+  renderFiles();
+});
+$('#filter').addEventListener('input', renderFiles);
+$('#refresh').addEventListener('click', loadFiles);
+
+// ── 업로드 ──
+function upload(fileList) {
+  if (!fileList.length) return;
+  const fd = new FormData(); for (const f of fileList) fd.append('files', f);
+  const xhr = new XMLHttpRequest(); const prog = $('#upProg');
+  prog.style.display = 'block';
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.firstElementChild.style.width = `${e.loaded / e.total * 100}%`; };
+  xhr.onloadend = async () => {
+    prog.style.display = 'none'; prog.firstElementChild.style.width = '0';
+    if (xhr.status !== 200) return alert('업로드 실패: ' + xhr.statusText);
+    for (const s of JSON.parse(xhr.responseText).saved) state.selected.add(`${s.folder}/${s.name}`);
+    loadFiles();
+  };
+  xhr.open('POST', '/api/upload'); xhr.send(fd);
+}
+$('#pickBtn').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', (e) => { upload(e.target.files); e.target.value = ''; });
+const drop = $('#drop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => upload(e.dataTransfer.files));
+
+// ── YouTube ──
+const yt = { data: null, checked: new Set() };
+const ytSubs = () => document.querySelector('[name=ytSubs]:checked').value;
+const curLang = () => document.querySelector('[name=lang]:checked').value;
+const LANG = { ko: '한국어', en: '영어' };
+$('#ytForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#ytLoad'); btn.disabled = true; btn.textContent = '불러오는 중…';
+  try {
+    yt.data = await api(`/api/youtube/info?url=${encodeURIComponent($('#ytUrl').value.trim())}`);
+    yt.checked = new Set(yt.data.videos.map(v => v.id));
+    renderYt(); $('#ytResult').hidden = false;
+  } catch (err) { alert(err.message); }
+  finally { btn.disabled = false; btn.textContent = '불러오기'; }
+});
+function renderYt() {
+  const d = yt.data; if (!d) return;
+  const meta = [d.uploader, d.type === 'playlist' ? `재생목록 · ${d.videos.length}개 영상` : (d.videos[0].duration ? fmtDur(d.videos[0].duration) : '')].filter(Boolean).join(' · ');
+  let html = `<div class="yt-title">${esc(d.title || '')}</div><div class="hint">${esc(meta)}</div>`;
+  if (d.type === 'video') {
+    const v = d.videos[0];
+    const chips = v.tracks.map(t => `<span class="chip ${t.translated ? '' : t.kind === 'manual' ? 'ok' : 'warn'}" title="${esc(t.name)} (${esc(t.key)})">${LANG[t.lang]} · ${t.kind === 'manual' ? '업로더 자막' : '자동 생성'}${t.translated ? ' (번역본 · 사용 안 함)' : ''}</span>`);
+    html += `<div class="yt-chips">${chips.join('') || '<span class="chip">한국어/영어 자막 없음</span>'}${v.has_transcript ? '<span class="chip run">이미 전사됨</span>' : ''}</div>`;
+  } else {
+    html += `<div class="yt-list"><label><input type="checkbox" id="ytAll" ${yt.checked.size === d.videos.length ? 'checked' : ''}><span class="t"><b>전체 선택</b> (${yt.checked.size}/${d.videos.length})</span></label>` +
+      d.videos.map(v => `<label><input type="checkbox" data-yt="${esc(v.id)}" ${yt.checked.has(v.id) ? 'checked' : ''}><span class="t">${esc(v.title)}</span>` +
+        `${v.has_transcript ? '<span class="chip run">전사됨</span>' : ''}<span class="num hint" style="margin:0">${v.duration ? fmtDur(v.duration) : ''}</span></label>`).join('') + '</div>';
+  }
+  $('#ytInfo').innerHTML = html;
+  updYtHint();
+}
+function updYtHint() {
+  const d = yt.data; if (!d) return;
+  const subs = ytSubs(), lang = curLang();
+  const engine = $('#ytEngine').selectedOptions[0]?.textContent || '';
+  let hint;
+  if (subs === 'off') hint = `오디오를 내려받아 ${engine}로 음성 인식합니다.`;
+  else if (d.type === 'playlist') hint = `영상마다 ${LANG[lang]} ${subs === 'manual' ? '업로더 ' : ''}자막을 찾아 쓰고, 없으면 ${engine}로 음성 인식합니다. 어떤 자막을 썼는지는 결과에 표시됩니다.`;
+  else {
+    const c = d.videos[0].choices[lang][subs];
+    hint = c ? `→ ${LANG[lang]} ${CAPTION[c]}을 사용합니다.${c === 'auto' ? ' 자동 생성 자막은 문장 부호가 없고 오인식이 있을 수 있습니다.' : ''}`
+             : `→ ${LANG[lang]} ${subs === 'manual' ? '업로더 ' : ''}자막이 없어 ${engine}로 음성 인식합니다.`;
+  }
+  $('#ytHint').textContent = hint;
+  const n = d.type === 'playlist' ? yt.checked.size : 1;
+  $('#ytStart').disabled = n === 0;
+  $('#ytStart').textContent = n > 1 ? `YouTube 영상 ${n}개 작업 추가` : 'YouTube 작업 추가';
+}
+$('#ytInfo').addEventListener('change', (e) => {
+  // 목록을 다시 그리지 않고 제자리 갱신 (스크롤 위치 유지)
+  if (e.target.id === 'ytAll') {
+    yt.checked = e.target.checked ? new Set(yt.data.videos.map(v => v.id)) : new Set();
+    $('#ytInfo').querySelectorAll('[data-yt]').forEach(c => { c.checked = e.target.checked; });
+  } else if (e.target.dataset.yt) {
+    e.target.checked ? yt.checked.add(e.target.dataset.yt) : yt.checked.delete(e.target.dataset.yt);
+  } else return;
+  const all = $('#ytAll');
+  all.checked = yt.checked.size === yt.data.videos.length;
+  all.nextElementSibling.innerHTML = `<b>전체 선택</b> (${yt.checked.size}/${yt.data.videos.length})`;
+  updYtHint();
+});
+$('#ytSubs').addEventListener('change', () => { lsSet('ytSubs', ytSubs()); updYtHint(); });
+$('#ytEngine').addEventListener('change', () => { lsSet('ytEngine', $('#ytEngine').value); updYtHint(); });
+document.querySelectorAll('[name=lang]').forEach(r => r.addEventListener('change', updYtHint));
+$('#ytStart').addEventListener('click', async () => {
+  const d = yt.data;
+  const videos = d.videos.filter(v => d.type === 'video' || yt.checked.has(v.id)).map(v => ({ url: v.url, title: v.title }));
+  try {
+    const r = await api('/api/jobs/youtube', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      videos, subs: ytSubs(), engine: $('#ytEngine').value, ...commonOpts(),
+    }) });
+    r.created.forEach(id => state.openLogs.add(id));
+    yt.data = null; $('#ytResult').hidden = true; $('#ytUrl').value = '';
+    pollJobs();
+  } catch (e) { alert('작업 생성 실패: ' + e.message); }
+});
+
+// ── 작업 생성 ──
+function commonOpts() {
+  return {
+    language: curLang(),
+    gpu: Number($('#gpu').value),
+    summarize: $('#summarize').checked,
+    overwrite: $('#overwrite').checked,
+  };
+}
+$('#start').addEventListener('click', async () => {
+  const files = [...state.selected].map(k => { const i = k.indexOf('/'); return { folder: k.slice(0, i), name: k.slice(i + 1) }; });
+  try {
+    const r = await api('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      files,
+      engine: document.querySelector('[name=engine]:checked').value,
+      ...commonOpts(),
+    }) });
+    r.created.forEach(id => state.openLogs.add(id));
+    state.selected.clear(); renderFiles(); pollJobs();
+  } catch (e) { alert('작업 생성 실패: ' + e.message); }
+});
+
+// ── 작업 목록 ──
+const STATUS = { queued: ['대기', ''], running: ['실행 중', 'run'], done: ['완료', 'ok'], error: ['오류', 'err'], cancelled: ['취소됨', 'warn'] };
+let prevDone = new Set(), polling = false;
+async function pollJobs() {
+  if (polling) return; polling = true;
+  try { await pollJobsInner(); } finally { polling = false; }
+}
+async function pollJobsInner() {
+  state.jobs = await api('/api/jobs');
+  const box = $('#jobs');
+  if (!state.jobs.length) { box.innerHTML = '<div class="empty">아직 작업이 없습니다</div>'; return; }
+  // 기존 DOM 유지(로그 스크롤 위치 보존)하며 갱신
+  const ids = new Set(state.jobs.map(j => j.id));
+  [...box.children].forEach(el => { if (!ids.has(el.dataset.id)) el.remove(); });
+  let prevEl = null;
+  for (const j of state.jobs) {
+    let el = box.querySelector(`.job[data-id="${j.id}"]`);
+    if (!el) { el = document.createElement('div'); el.className = 'job'; el.dataset.id = j.id;
+      el.innerHTML = `<div class="top"></div><pre class="log" hidden></pre>`; }
+    if (prevEl ? prevEl.nextSibling !== el : box.firstChild !== el) prevEl ? prevEl.after(el) : box.prepend(el);
+    prevEl = el;
+    const [label, cls] = STATUS[j.status];
+    const now = Date.now() / 1000;
+    const dur = j.started ? fmtDur((j.finished || now) - j.started) : '';
+    const stem = j.stem;
+    const engineLabel = state.config?.engines.find(e => e.id === j.engine)?.label || j.engine;
+    const how = j.caption ? `YouTube ${CAPTION[j.caption]}` : engineLabel;
+    el.querySelector('.top').innerHTML = `
+      <span class="chip ${cls}">${label}</span>
+      ${j.url ? '<span class="chip yt-tag">YouTube</span>' : ''}
+      <span class="fname">${esc(j.filename)}</span>
+      ${captionChip(j.caption)}
+      <span class="meta">${esc(how)} · ${j.language} · cuda:${j.gpu}${j.summarize ? ' · 요약' : ''}${dur ? ' · ' + dur : ''}${j.error ? ' · ' + esc(j.error) : ''}</span>
+      <span class="actions">
+        ${j.status === 'done' ? `<button data-view="txt" data-stem="${esc(stem)}">전사본</button>${j.summarize ? `<button data-view="md" data-stem="${esc(stem)}">요약</button>` : ''}` : ''}
+        <button data-log="${j.id}">${state.openLogs.has(j.id) ? '로그 닫기' : '로그'}</button>
+        ${['queued', 'running'].includes(j.status) ? `<button data-cancel="${j.id}" data-running="${j.status === 'running' ? 1 : ''}">${j.status === 'running' ? '중단' : '취소'}</button>` : ''}
+      </span>`;
+    const pre = el.querySelector('pre.log');
+    pre.hidden = !state.openLogs.has(j.id);
+    if (!pre.hidden && (j.status === 'running' || !pre.dataset.final)) {
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+      pre.textContent = await api(`/api/jobs/${j.id}/log`) || '(대기 중)';
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+      if (['done', 'error', 'cancelled'].includes(j.status)) pre.dataset.final = '1';
+    }
+  }
+  const done = new Set(state.jobs.filter(j => j.status === 'done').map(j => j.id));
+  if ([...done].some(id => !prevDone.has(id))) loadFiles();
+  prevDone = done;
+}
+$('#jobs').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.view) return openViewer(b.dataset.view, b.dataset.stem);
+  if (b.dataset.log) { const id = b.dataset.log; state.openLogs.has(id) ? state.openLogs.delete(id) : state.openLogs.add(id);
+    const pre = b.closest('.job').querySelector('pre'); delete pre.dataset.final; }
+  if (b.dataset.cancel && b.dataset.running && !confirm('실행 중인 작업을 중단할까요? 진행 중이던 결과는 저장되지 않습니다.')) return;
+  if (b.dataset.cancel) await api(`/api/jobs/${b.dataset.cancel}`, { method: 'DELETE' }).catch(err => alert(err.message));
+  pollJobs();
+});
+$('#clearDone').addEventListener('click', async () => {
+  for (const j of state.jobs) if (['done', 'error', 'cancelled'].includes(j.status)) await api(`/api/jobs/${j.id}`, { method: 'DELETE' }).catch(() => {});
+  pollJobs();
+});
+
+// ── 결과 보기 ──
+async function openViewer(kind, stem) {
+  try {
+    const text = await api(`/api/result/${kind}/${encodeURIComponent(stem)}`);
+    $('#vTitle').textContent = `${stem}.${kind}`;
+    $('#vBody').textContent = text;
+    $('#vDownload').href = `/api/result/${kind}/${encodeURIComponent(stem)}?download=true`;
+    $('#viewer').showModal();
+  } catch (e) { alert(e.message); }
+}
+$('#vClose').addEventListener('click', () => $('#viewer').close());
+$('#vCopy').addEventListener('click', async () => { await navigator.clipboard.writeText($('#vBody').textContent); $('#vCopy').textContent = '복사됨'; setTimeout(() => $('#vCopy').textContent = '복사', 1200); });
+$('#viewer').addEventListener('click', (e) => { if (e.target === $('#viewer')) $('#viewer').close(); });
+
+// ── 시작 ──
+(async () => {
+  await Promise.all([loadConfig(), loadFiles()]);
+  await pollJobs();
+  setInterval(() => pollJobs().catch(() => {}), 1500);
+})();
+</script>
+</body>
+</html>

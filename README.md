@@ -8,9 +8,10 @@
 
 ## 특징
 
-- **오프라인 전사**: `moonshine-tiny` / `faster-whisper` 2가지 로컬 음성 인식 엔진 중 선택 (GPU 가속)
+- **오프라인 전사**: `Qwen3-ASR`(기본) / `faster-whisper` 로컬 음성 인식 엔진 (GPU 가속)
 - **다국어 지원**: 한국어(`ko`) / 영어(`en`) 선택 가능
 - **일괄 처리**: `--all-audio` 플래그로 `audio/` 폴더 전체 배치 전사
+- **YouTube 지원**: 영상/재생목록 URL로 바로 전사, 업로더 자막·자동 생성 자막을 구분해 선택적으로 활용
 - **AI 요약**: `--summarize` 플래그로 Claude API를 통한 구조화된 한국어 요약 생성
 - **스킵 로직**: 이미 생성된 파일은 건너뛰어 중복 작업 방지
 
@@ -20,14 +21,22 @@
 
 | 엔진 | 모델 | 특징 | 언어 |
 |------|------|------|------|
-| `moonshine` (기본값) | [Moonshine Tiny Korean](https://huggingface.co/UsefulSensors/moonshine-tiny-ko) / [Moonshine Tiny](https://huggingface.co/UsefulSensors/moonshine-tiny) | 경량, 빠른 속도 | ko / en 별도 모델 |
+| `qwen3-asr` (기본값) | [Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf) + [ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) | 단어 단위 타임스탬프 → 문장 단위 줄 | ko / en |
 | `faster-whisper` | [Whisper large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) | 고정밀, 다국어 지원 | ko / en 동일 모델 |
+
+### Qwen3-ASR 참고사항
+
+- 오디오를 최대 60초 청크(가장 조용한 지점에서 분할)로 나눠 8개씩 배치 처리합니다. 정렬기는 청크가 길면(120초 이상) 끝부분 타임스탬프가 뭉개져 60초로 제한했습니다.
+- ForcedAligner가 단어별 시간을 찾고, 이를 문장 부호 기준으로 묶어 `[시작 --> 끝] 문장` 형태로 저장합니다. JSON에는 단어별 타임스탬프(`words`)도 포함됩니다.
+- 정렬기가 위치를 못 잡은 단어는 앞뒤 단어 기준으로 보간하며, 그 개수를 로그에 표시합니다.
+- bfloat16을 사용하므로 Compute Capability 7.0 미만 GPU(TITAN Xp 등)는 웹 UI에서 선택할 수 없습니다.
+- 첫 실행 시 모델(약 5GB)을 내려받습니다.
 
 ## 요구사항
 
 | 항목 | 값 |
 |------|-----|
-| Python | 3.10 ~ 3.13 |
+| Python | 3.11 ~ 3.13 |
 | 패키지 관리자 | [uv](https://docs.astral.sh/uv/) |
 | GPU | CUDA 12.4 권장 (없으면 CPU로 fallback, 느림) |
 
@@ -43,6 +52,19 @@ uv sync
 
 ## 사용법
 
+### 웹 UI (권장)
+
+```bash
+uv run web.py                       # http://127.0.0.1:8000
+uv run web.py --host 0.0.0.0 --port 8080   # 외부 접속 허용
+```
+
+브라우저에서 파일을 업로드하거나 `input/`·`audio/` 목록에서 여러 개를 선택한 뒤 엔진·언어·GPU·요약 옵션을 고르고 **변환 시작**을 누르면 됩니다.
+작업은 큐에 쌓여 하나씩 순차 실행되며, 진행 로그와 전사본/요약본을 페이지에서 바로 확인·다운로드할 수 있습니다.
+GPU 번호는 `nvidia-smi`와 동일한 순서(`PCI_BUS_ID`)로 표시됩니다.
+
+> 원격 서버에서 실행할 경우 VS Code 포트 포워딩이나 `ssh -L 8000:localhost:8000 서버` 로 접속하세요.
+
 ### 대화형 모드 (파일/언어/요약 여부를 묻는 프롬프트)
 
 ```bash
@@ -52,7 +74,7 @@ uv run convert.py
 ### 파일 지정 실행
 
 ```bash
-# input/ 폴더의 파일 전사 (한국어, moonshine 기본)
+# input/ 폴더의 파일 전사 (한국어, Qwen3-ASR)
 uv run convert.py lecture.mp4
 
 # 영어 전사
@@ -64,6 +86,31 @@ uv run convert.py lecture.mp4 --engine faster-whisper
 # 전사 + Claude 요약
 uv run convert.py lecture.mp4 --summarize
 ```
+
+### YouTube 영상 / 재생목록
+
+웹 UI의 **파일** 패널 맨 위에 URL을 붙여넣고 **불러오기**를 누르면 영상 정보와 자막 트랙이 표시됩니다(재생목록이면 영상을 골라 일괄 추가).
+CLI에서는 `--url`을 씁니다.
+
+```bash
+uv run convert.py --url "https://youtu.be/VIDEO_ID"                 # 오디오 다운로드 → Qwen3-ASR 전사
+uv run convert.py --url "https://youtu.be/VIDEO_ID" --subs manual   # 업로더 자막 우선, 없으면 음성 인식
+uv run convert.py --url "https://youtu.be/VIDEO_ID" --subs any      # 자동 생성 자막까지 허용
+uv run convert.py --url "https://www.youtube.com/playlist?list=..." --language en --summarize
+```
+
+| `--subs` | 동작 |
+|---|---|
+| `off` (기본값) | 자막을 쓰지 않고 오디오를 내려받아 음성 인식 |
+| `manual` | **업로더가 직접 올린 자막**이 있으면 사용, 없으면 음성 인식 |
+| `any` | 업로더 자막 → 없으면 **YouTube 자동 생성 자막** → 없으면 음성 인식 |
+
+- 결과 파일명은 `영상 제목 [영상ID]`이며, 이미 전사된 영상은 건너뜁니다. 오디오는 `audio/`에 MP3로 저장됩니다.
+- 자막으로 만든 전사본은 TXT 두 번째 줄에 `# 출처: YouTube 자막 [업로더]` 또는 `[자동 생성]`이 표기되고, 웹 UI 파일 목록과 작업 목록에도 `자막·업로더` / `자막·자동 생성` 칩으로 구분됩니다. JSON에는 `source` 필드로 영상 정보가 기록됩니다.
+- 다른 언어에서 **번역된 자막**(업로더 번역본, 자동 번역)은 실제 발화가 아니므로 사용하지 않습니다. 웹 UI에는 "번역본 · 사용 안 함"으로만 표시됩니다.
+- 자동 생성 자막은 문장 부호가 없어 최대 15초 단위로 이어 붙여 저장합니다.
+- `watch?v=...&list=...` 형태의 URL은 해당 영상 하나만 처리합니다. 재생목록 전체는 `playlist?list=...` URL을 쓰세요.
+- YouTube 추출에는 JS 런타임이 필요해 `deno` 패키지를 함께 설치합니다(시스템 설치 불필요). YouTube 변경으로 다운로드가 실패하면 `uv lock --upgrade-package yt-dlp && uv sync`로 업데이트하세요.
 
 ### 배치 처리 (`audio/` 폴더 전체)
 
@@ -98,8 +145,11 @@ ANTHROPIC_API_KEY=sk-ant-...   # --summarize 사용 시 필요
 
 ```
 mov-to-txt/
-├── convert.py          # 메인 스크립트
-├── config.py           # 환경 감지 및 GPU 설정
+├── convert.py          # 메인 스크립트 (CLI)
+├── web.py              # 웹 UI 서버
+├── static/index.html   # 웹 UI 페이지
+├── youtube.py          # YouTube 오디오/자막 가져오기 (yt-dlp)
+├── gpu_selector.py     # GPU 선택
 ├── .env                # 환경 변수 (ENV_MODE, ANTHROPIC_API_KEY)
 ├── pyproject.toml      # 의존성 정의
 ├── uv.lock             # 잠금 파일 (재현 가능한 환경)
