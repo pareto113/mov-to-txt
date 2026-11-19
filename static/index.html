@@ -439,12 +439,13 @@ async function pollJobsInner() {
     const how = j.caption ? `YouTube ${CAPTION[j.caption]}` : engineLabel;
     el.querySelector('.top').innerHTML = `
       <span class="chip ${cls}">${label}</span>
-      ${j.url ? '<span class="chip yt-tag">YouTube</span>' : ''}
+      ${j.url || j.count ? '<span class="chip yt-tag">YouTube</span>' : ''}
       <span class="fname">${esc(j.filename)}</span>
+      ${j.count ? `<span class="chip ${cls}" title="완료된 영상 수 (건너뛴 영상 포함)">${j.progress || '0/' + j.count} 완료</span>` : ''}
       ${captionChip(j.caption)}
       <span class="meta">${j.subdir ? `📁 ${esc(j.subdir)} · ` : ''}${esc(how)} · ${j.language} · cuda:${j.gpu}${j.summarize ? ' · 요약' : ''}${dur ? ' · ' + dur : ''}${j.error ? ' · ' + esc(j.error) : ''}</span>
       <span class="actions">
-        ${j.status === 'done' ? `<button data-view="txt" data-stem="${esc(stem)}">전사본</button>${j.summarize ? `<button data-view="md" data-stem="${esc(stem)}">요약</button>` : ''}` : ''}
+        ${j.status === 'done' && stem ? `<button data-view="txt" data-stem="${esc(stem)}">전사본</button>${j.summarize ? `<button data-view="md" data-stem="${esc(stem)}">요약</button>` : ''}` : ''}
         <button data-log="${j.id}">${state.openLogs.has(j.id) ? '로그 닫기' : '로그'}</button>
         ${['queued', 'running'].includes(j.status) ? `<button data-cancel="${j.id}" data-running="${j.status === 'running' ? 1 : ''}">${j.status === 'running' ? '중단' : '취소'}</button>` : ''}
       </span>`;
@@ -457,7 +458,9 @@ async function pollJobsInner() {
       if (['done', 'error', 'cancelled'].includes(j.status)) pre.dataset.final = '1';
     }
   }
-  const done = new Set(state.jobs.filter(j => j.status === 'done').map(j => j.id));
+  // 작업이 끝나거나 묶음 작업에서 영상 하나가 끝날 때마다 파일 목록 갱신
+  const done = new Set(state.jobs.filter(j => j.status === 'done').map(j => j.id)
+    .concat(state.jobs.filter(j => j.progress).map(j => `${j.id}:${j.progress}`)));
   if ([...done].some(id => !prevDone.has(id))) loadFiles();
   prevDone = done;
 }

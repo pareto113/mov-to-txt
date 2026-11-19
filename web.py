@@ -48,6 +48,7 @@ STATIC_DIR = BASE_DIR / "static"
 
 FOLDERS = {"input": INPUT_DIR, "audio": AUDIO_DIR}
 MAX_LOG_CHARS = 200_000
+PROGRESS_RE = re.compile(r"\[진행\] (\d+)/(\d+) 완료")
 
 
 # ─────────────────────────────────────────────
@@ -69,6 +70,8 @@ class Job:
     subdir: str | None = None   # YouTube 재생목록 작업이면 결과를 모을 하위 폴더명
     subs: str = "off"           # YouTube 자막 정책 (youtube.SUBS_POLICIES)
     caption: str | None = None  # 완료 후: 자막으로 만들었으면 manual | auto
+    videos: list[dict] | None = None  # YouTube 묶음 작업: [{id, url, title}] — 한 프로세스에서 파이프라인으로 처리
+    progress: str | None = None       # 묶음 작업 진행 상황 "3/27"
     status: str = "queued"  # queued | running | done | error | cancelled
     created: float = field(default_factory=time.time)
     started: float | None = None
@@ -85,10 +88,20 @@ class Job:
             self.log += part
         if len(self.log) > MAX_LOG_CHARS:
             self.log = self.log[-MAX_LOG_CHARS:]
+        if self.videos and "[진행]" in self.log[-(len(s) + 64):]:
+            if m := list(PROGRESS_RE.finditer(self.log[-(len(s) + 64):])):
+                self.progress = f"{m[-1].group(1)}/{m[-1].group(2)}"
+
+    def video_stems(self) -> list[str]:
+        """묶음 작업 각 영상의 결과 경로 (convert.py와 같은 규칙으로 계산)."""
+        pre = f"{self.subdir}/" if self.subdir else ""
+        return [pre + youtube.make_name(v["title"], v["id"]) for v in self.videos or []]
 
     @property
-    def stem(self) -> str:
-        """결과 파일 경로(transcripts/ 기준, 확장자 제외). 하위 폴더에 있으면 '폴더/이름'."""
+    def stem(self) -> str | None:
+        """결과 파일 경로(transcripts/ 기준, 확장자 제외). 하위 폴더에 있으면 '폴더/이름'. 묶음 작업은 None."""
+        if self.videos:
+            return None
         if self.name:
             return f"{self.subdir}/{self.name}" if self.subdir else self.name
         return str(Path(self.filename).with_suffix(""))
@@ -96,6 +109,7 @@ class Job:
     def summary(self) -> dict:
         d = asdict(self)
         d.pop("log")
+        d["count"] = len(d.pop("videos") or [])
         d["stem"] = self.stem
         return d
 
@@ -123,7 +137,11 @@ def _run_job(job: Job) -> int:
     프로세스가 끝나면 CUDA 컨텍스트가 OS에 의해 해제되므로 GPU 점유가 남지 않는다.
     CUDA_VISIBLE_DEVICES로 선택한 GPU 하나만 보이게 하여 다른 GPU에는 손대지 않는다.
     """
-    if job.url:
+    if job.videos:  # 묶음: 한 프로세스에서 다운로드·전사를 겹쳐 처리하고 모델은 한 번만 로드
+        source_args = [a for v in job.videos for a in ("--url", v["url"])] + ["--subs", job.subs]
+        if job.subdir:
+            source_args += ["--folder", job.subdir]
+    elif job.url:
         source_args = ["--url", job.url, "--name", job.name, "--subs", job.subs]
         if job.subdir:
             source_args += ["--folder", job.subdir]
@@ -134,12 +152,13 @@ def _run_job(job: Job) -> int:
         source_args = [str(input_path)]
 
     if job.overwrite:
-        outs = _output_paths(job.stem)
-        targets = [outs["txt"], outs["json"]] + ([outs["md"]] if job.summarize else [])
-        for p in targets:
-            if p.exists():
-                p.unlink()
-                job.append_log(f"[덮어쓰기] 기존 파일 삭제: {p.relative_to(BASE_DIR)}\n")
+        for stem in job.video_stems() if job.videos else [job.stem]:
+            outs = _output_paths(stem)
+            targets = [outs["txt"], outs["json"]] + ([outs["md"]] if job.summarize else [])
+            for p in targets:
+                if p.exists():
+                    p.unlink()
+                    job.append_log(f"[덮어쓰기] 기존 파일 삭제: {p.relative_to(BASE_DIR)}\n")
 
     cmd = [
         sys.executable, "-u", str(BASE_DIR / "convert.py"), *source_args,
@@ -158,7 +177,9 @@ def _run_job(job: Job) -> int:
         "PYTHONWARNINGS": "ignore::SyntaxWarning",  # soynlp(한국어 정렬용)의 정규식 경고가 로그를 덮는 것 방지
     })
 
-    if job.url:
+    if job.videos:
+        job.append_log(f"[설정] YouTube 영상 {len(job.videos)}개 묶음 처리 · 자막: {youtube.SUBS_POLICIES[job.subs]}\n")
+    elif job.url:
         job.append_log(f"[설정] YouTube {job.url} · 자막: {youtube.SUBS_POLICIES[job.subs]}\n")
     job.append_log(
         f"[설정] 엔진={job.engine}, 언어={job.language}, GPU={job.gpu}번 "
@@ -197,7 +218,8 @@ def _worker() -> None:
                 job.append_log("\n[취소됨] 사용자가 작업을 중단했습니다.\n")
             elif code == 0:
                 job.status = "done"
-                job.caption = youtube.read_caption_kind(_output_paths(job.stem)["txt"])
+                if job.stem:
+                    job.caption = youtube.read_caption_kind(_output_paths(job.stem)["txt"])
             else:
                 job.status = "error"
                 job.error = f"작업 프로세스 종료 코드 {code}"
@@ -437,12 +459,39 @@ def create_youtube_jobs(req: YoutubeJobRequest):
             raise HTTPException(400, "잘못된 재생목록 ID")
         # 폴더명도 클라이언트 값 대신 서버에서 계산 (경로 조작 방지)
         subdir = youtube.make_name(str(req.playlist.get("title") or ""), pid)
-    created = []
+    videos = []
     for v in req.videos:
         url, title = str(v.get("url", "")), str(v.get("title") or "")
         m = re.fullmatch(r"https://www\.youtube\.com/watch\?v=([\w-]{6,20})", url)
         if not m:
             raise HTTPException(400, f"잘못된 영상 URL: {url}")
+        videos.append({"id": m.group(1), "url": url, "title": title})
+    if not videos:
+        raise HTTPException(400, "선택한 영상이 없습니다")
+
+    if len(videos) > 1:
+        # 여러 영상은 작업 하나로 묶는다: 다운로드와 전사를 겹쳐 처리하고 모델은 한 번만 로드
+        title = str((req.playlist or {}).get("title") or "YouTube")
+        job = Job(
+            id=uuid.uuid4().hex[:8],
+            folder="youtube",
+            filename=f"{title} — 영상 {len(videos)}개",
+            videos=videos,
+            subdir=subdir,
+            subs=req.subs,
+            engine=req.engine,
+            language=req.language,
+            summarize=req.summarize,
+            gpu=req.gpu,
+            overwrite=req.overwrite,
+        )
+        _enqueue(job)
+        return {"created": [job.id]}
+
+    created = []
+    for v in videos:
+        url, title = v["url"], v["title"]
+        m = re.fullmatch(r"https://www\.youtube\.com/watch\?v=([\w-]{6,20})", url)
         job = Job(
             id=uuid.uuid4().hex[:8],
             folder="youtube",

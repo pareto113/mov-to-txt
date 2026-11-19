@@ -182,21 +182,28 @@ def caption_choices(info: dict) -> dict:
 # 오디오 다운로드
 # ─────────────────────────────────────────────
 
-def download_audio(info: dict, dest_dir: Path) -> Path:
-    """오디오 스트림만 dest_dir에 내려받고 파일 경로를 반환한다 (MP3 변환은 호출 측에서)."""
+def download_audio(info: dict, dest_dir: Path, progress: bool = True, prefix: str = "") -> Path:
+    """오디오 스트림만 dest_dir에 내려받고 파일 경로를 반환한다 (MP3 변환은 호출 측에서).
+
+    progress=False면 '\\r' 진행률 대신 완료 시 한 줄만 출력한다 (전사와 동시에 받을 때 로그가 섞이지 않게).
+    """
+    import time
     dest_dir.mkdir(parents=True, exist_ok=True)
-    last = {"pct": -1}
+    last = {"pct": -1, "t0": time.monotonic()}
 
     def hook(d):
-        if d["status"] == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            if total:
-                pct = int(d["downloaded_bytes"] * 100 / total)
-                if pct != last["pct"]:
-                    last["pct"] = pct
-                    print(f"\r[Step 0] 오디오 다운로드 중... {pct}% ({total / 1048576:.1f}MB)", end="", flush=True)
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        if d["status"] == "downloading" and progress and total:
+            pct = int(d["downloaded_bytes"] * 100 / total)
+            if pct != last["pct"]:
+                last["pct"] = pct
+                print(f"\r{prefix}[Step 0] 오디오 다운로드 중... {pct}% ({total / 1048576:.1f}MB)", end="", flush=True)
         elif d["status"] == "finished":
-            print()
+            if progress:
+                print()
+            else:
+                size = f"{total / 1048576:.1f}MB, " if total else ""
+                print(f"{prefix}[Step 0] 오디오 다운로드 완료 ({size}{time.monotonic() - last['t0']:.0f}초)", flush=True)
 
     # 조회 때 받은 스트림 URL은 다른 세션에서 쓰면 403이 나므로 다운로드 시 새로 추출한다.
     # YouTube는 같은 포맷도 간헐적으로 403을 주므로, 실패하면 새로 추출해 포맷을 바꿔가며 재시도한다.
@@ -214,7 +221,7 @@ def download_audio(info: dict, dest_dir: Path) -> Path:
         except yt_dlp.utils.DownloadError as e:
             if "403" not in str(e) or attempt == len(formats):
                 raise
-            print(f"\n[Step 0] 다운로드 거부(403) — 다시 시도합니다 ({attempt}/{len(formats) - 1})")
+            print(f"\n{prefix}[Step 0] 다운로드 거부(403) — 다시 시도합니다 ({attempt}/{len(formats) - 1})")
             for p in dest_dir.iterdir():  # 받다 만 조각 정리
                 p.unlink(missing_ok=True)
     raise AssertionError("unreachable")

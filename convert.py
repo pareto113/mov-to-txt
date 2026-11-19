@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 import gpu_selector
 
@@ -61,6 +62,8 @@ ENGINES = {
     "faster-whisper": {"label": f"faster-whisper {FASTER_WHISPER_MODEL}", "desc": "고정밀, 다국어 지원"},
 }
 DEFAULT_ENGINE = "qwen3-asr"
+
+YT_PREFETCH = 2  # 재생목록 처리 시 전사보다 앞서 받아 둘 오디오 수 (디스크 사용량과 GPU 대기 시간의 절충)
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
 
@@ -144,8 +147,9 @@ def extract_audio(video_path: Path, audio_dir: Path, name: str | None = None) ->
 
     if result.returncode != 0:
         stderr_tail = result.stderr.decode("utf-8", errors="replace")[-500:]
-        print(f"[Step 1] ffmpeg 오류:\n{stderr_tail}", file=sys.stderr)
-        sys.exit(1)
+        output_path.unlink(missing_ok=True)  # 반쯤 쓴 파일이 '이미 존재'로 건너뛰어지지 않게
+        # sys.exit 대신 예외: 재생목록 파이프라인의 다운로드 스레드에서 호출되므로
+        raise RuntimeError(f"ffmpeg 오류: {video_path.name}\n{stderr_tail}")
 
     print(f"[Step 1] 완료: {output_path}")
     return output_path
@@ -154,6 +158,19 @@ def extract_audio(video_path: Path, audio_dir: Path, name: str | None = None) ->
 # ─────────────────────────────────────────────
 # Step 2: 음성 인식
 # ─────────────────────────────────────────────
+
+# 한 프로세스에서 여러 파일을 전사할 때(재생목록) 모델을 매번 다시 올리지 않도록 캐시한다.
+_MODEL_CACHE: dict[tuple, object] = {}
+
+
+def _cached_model(key: tuple, label: str, loader):
+    if key in _MODEL_CACHE:
+        print(f"[Step 2] {label} 모델 재사용 (이미 로드됨)")
+    else:
+        print(f"[Step 2] {label} 모델 로드 중: {', '.join(str(k) for k in key[1:])}")
+        _MODEL_CACHE[key] = loader()
+    return _MODEL_CACHE[key]
+
 
 def _transcribe_faster_whisper(audio_path: Path, transcript_dir: Path, name: str, language: str = "ko") -> Path:
     from faster_whisper import WhisperModel
@@ -171,8 +188,11 @@ def _transcribe_faster_whisper(audio_path: Path, transcript_dir: Path, name: str
     device_index = gpu_selector.index()
     compute_type = gpu_selector.compute_type()
 
-    print(f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cuda:{device_index}, {compute_type})" if cuda_available else f"[Step 2] faster-whisper 모델 로드 중: {FASTER_WHISPER_MODEL} (cpu, {compute_type})")
-    model = WhisperModel(FASTER_WHISPER_MODEL, device=device, device_index=device_index, compute_type=compute_type)
+    where = f"cuda:{device_index}" if cuda_available else "cpu"
+    model = _cached_model(
+        ("faster-whisper", FASTER_WHISPER_MODEL, where, compute_type), "faster-whisper",
+        lambda: WhisperModel(FASTER_WHISPER_MODEL, device=device, device_index=device_index, compute_type=compute_type),
+    )
 
     print(f"[Step 2] 전사 중: {audio_path}")
     fw_segments, info = model.transcribe(str(audio_path), language=language, beam_size=5)
@@ -327,11 +347,18 @@ def _transcribe_qwen(audio_path: Path, transcript_dir: Path, name: str, language
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     lang_name = QWEN_LANGUAGES[language]
 
-    print(f"[Step 2] Qwen3-ASR 모델 로드 중: {QWEN_ASR_MODEL} + {QWEN_ALIGNER_MODEL} ({device}, {str(dtype).replace('torch.', '')})")
-    asr_proc = AutoProcessor.from_pretrained(QWEN_ASR_MODEL)
-    asr = Qwen3ASRForConditionalGeneration.from_pretrained(QWEN_ASR_MODEL, dtype=dtype, device_map=device)
-    al_proc = AutoProcessor.from_pretrained(QWEN_ALIGNER_MODEL)
-    aligner = Qwen3ASRForTokenClassification.from_pretrained(QWEN_ALIGNER_MODEL, dtype=dtype, device_map=device)
+    def load():
+        return (
+            AutoProcessor.from_pretrained(QWEN_ASR_MODEL),
+            Qwen3ASRForConditionalGeneration.from_pretrained(QWEN_ASR_MODEL, dtype=dtype, device_map=device),
+            AutoProcessor.from_pretrained(QWEN_ALIGNER_MODEL),
+            Qwen3ASRForTokenClassification.from_pretrained(QWEN_ALIGNER_MODEL, dtype=dtype, device_map=device),
+        )
+
+    asr_proc, asr, al_proc, aligner = _cached_model(
+        ("qwen3-asr", f"{QWEN_ASR_MODEL} + {QWEN_ALIGNER_MODEL}", device, str(dtype).replace("torch.", "")),
+        "Qwen3-ASR", load,
+    )
 
     sr = asr_proc.feature_extractor.sampling_rate  # 16000
     print(f"[Step 2] 오디오 로드 중: {audio_path}")
@@ -443,8 +470,8 @@ def summarize(txt_path: Path, summary_dir: Path, name: str) -> None:
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("[Step 3] 오류: ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.", file=sys.stderr)
-        sys.exit(1)
+        # sys.exit 대신 예외: 재생목록 파이프라인의 요약 스레드에서 호출되므로
+        raise RuntimeError("[Step 3] ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.")
 
     import anthropic
 
@@ -582,7 +609,10 @@ def main() -> None:
         default=DEFAULT_ENGINE,
         help=f"음성 인식 엔진 (기본값: {DEFAULT_ENGINE})",
     )
-    parser.add_argument("--url", help="YouTube 영상 또는 재생목록 URL")
+    parser.add_argument(
+        "--url", action="append",
+        help="YouTube 영상 또는 재생목록 URL. 여러 번 지정 가능 (여러 영상은 다운로드와 전사를 겹쳐 처리하고 모델은 한 번만 로드)",
+    )
     parser.add_argument(
         "--subs",
         choices=["off", "manual", "any"],
@@ -603,6 +633,8 @@ def main() -> None:
         help="사용할 GPU 인덱스 (지정 시 ENV_MODE=server의 대화형 GPU 선택을 건너뜀)",
     )
     args = parser.parse_args()
+    if args.name and args.url and len(args.url) > 1:
+        parser.error("--name은 --url이 하나일 때만 쓸 수 있습니다")
 
     if args.gpu is not None:
         gpu_selector.set_index(args.gpu)
@@ -709,8 +741,37 @@ def run_pipeline(
     return txt_path
 
 
+class _ThreadSafeStdout:
+    """여러 스레드가 동시에 출력할 때 '\\r' 진행 표시줄과 다른 스레드의 줄이 한 줄에 섞이지 않게 한다.
+
+    다른 스레드가 끝나지 않은 줄(진행 표시줄)을 남겨 둔 상태에서 출력하면 먼저 줄을 바꿔 준다.
+    """
+
+    def __init__(self, stream):
+        self._s = stream
+        self._lock = threading.Lock()
+        self._open_by = None  # 줄바꿈 없이 끝난 마지막 출력의 스레드
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            me = threading.get_ident()
+            if self._open_by is not None and self._open_by != me:
+                self._s.write("\n")
+            self._s.write(text)
+            self._open_by = None if text.endswith("\n") else me
+        return len(text)
+
+    def flush(self) -> None:
+        self._s.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
 def run_youtube(
-    url: str,
+    urls: str | list[str],
     language: str = "ko",
     engine: str = DEFAULT_ENGINE,
     subs: str = "off",
@@ -718,89 +779,151 @@ def run_youtube(
     name: str | None = None,
     folder: str | None = None,
     base_dir: Path | None = None,
+    prefetch: int = YT_PREFETCH,
 ) -> list[Path]:
-    """YouTube 영상(또는 재생목록의 각 영상)을 전사하고 전사본 경로 목록을 반환한다.
+    """YouTube 영상/재생목록(여러 URL 가능)을 전사하고 전사본 경로 목록을 반환한다.
+
+    여러 영상이면 파이프라인으로 처리한다:
+      - 다운로드 스레드: 영상 정보 조회 → (자막 사용 시) 자막 저장 / 오디오 다운로드 + MP3 변환을
+        최대 prefetch개 앞서 진행한다. GPU를 쓰지 않는 작업은 전부 여기서 끝난다.
+      - 메인 스레드: 준비된 오디오를 순서대로 전사한다. 모델은 처음 한 번만 올리고 재사용한다.
+      - 요약 스레드: 전사가 끝난 순서대로 Claude API 요약 (GPU를 기다리게 하지 않음).
 
     재생목록이면 결과를 audio/·transcripts/·summaries/ 아래 '재생목록 제목 [재생목록ID]' 폴더에 모은다.
-    folder를 주면 (단일 영상이라도) 그 하위 폴더에 저장한다 — 웹 UI가 재생목록 영상을 하나씩 실행할 때 사용.
+    folder를 주면 그 하위 폴더에 저장한다 — 웹 UI가 재생목록에서 고른 영상들을 넘길 때 사용.
     """
+    import queue
     import shutil
     import tempfile
+    from concurrent.futures import ThreadPoolExecutor
     import youtube
 
     base_dir = base_dir or Path(__file__).parent
+    urls = [urls] if isinstance(urls, str) else list(urls)
 
-    print(f"[Step 0] YouTube 정보 조회: {url}")
-    info = youtube.fetch_info(url)
-    if info.get("_type") == "playlist":
-        videos = youtube.playlist_videos(info)
-        if not videos:
-            print("[Step 0] 오류: 재생목록에 영상이 없습니다.", file=sys.stderr)
-            sys.exit(1)
-        folder = folder or youtube.make_name(info.get("title"), info["id"])
-        print(f"[Step 0] 재생목록 '{info.get('title')}' — {len(videos)}개 영상")
-        name = None  # 재생목록은 영상별 이름 사용
-    else:
-        videos = [{"id": info["id"], "url": youtube.video_url(info["id"]), "title": info.get("title")}]
+    # 1) 대상 영상 목록 (재생목록은 펼침)
+    videos = []
+    for url in urls:
+        print(f"[Step 0] YouTube 정보 조회: {url}")
+        info = youtube.fetch_info(url)
+        if info.get("_type") == "playlist":
+            entries = youtube.playlist_videos(info)
+            print(f"[Step 0] 재생목록 '{info.get('title')}' — {len(entries)}개 영상")
+            folder = folder or youtube.make_name(info.get("title"), info["id"])
+            videos += entries
+        else:  # 단일 영상은 조회한 전체 정보를 그대로 재사용
+            videos.append({"id": info["id"], "url": youtube.video_url(info["id"]), "title": info.get("title"), "info": info})
+    if not videos:
+        raise RuntimeError("처리할 영상이 없습니다 (빈 재생목록)")
+    n = len(videos)
+    if n > 1:
+        name = None  # 여러 영상이면 영상별 이름 사용
 
     if folder and not youtube.is_safe_folder(folder):
-        print(f"[Step 0] 오류: 잘못된 폴더명: {folder}", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"잘못된 폴더명: {folder}")
     sub = Path(folder) if folder else Path()
     audio_dir = base_dir / "audio" / sub
     transcript_dir = base_dir / "transcripts" / sub
     summary_dir = base_dir / "summaries" / sub
     if folder:
         print(f"[Step 0] 저장 폴더: {sub}/ (audio/, transcripts/, summaries/ 아래)")
+    if n > 1:
+        print(f"[Step 0] {n}개 영상 처리 — 오디오는 최대 {prefetch}개 앞서 받아 두고, 모델은 한 번만 로드합니다.")
+        if not isinstance(sys.stdout, _ThreadSafeStdout):
+            sys.stdout = _ThreadSafeStdout(sys.stdout)
 
+    def tag(i: int) -> str:
+        return f"[{i}/{n}] " if n > 1 else ""
+
+    # 2) 다운로드 스레드: GPU가 필요 없는 준비 작업
+    def prepare(i: int, v: dict) -> dict:
+        t = tag(i)
+        vinfo = v.get("info") or youtube.fetch_video(v["url"])
+        vname = name or youtube.make_name(vinfo.get("title"), vinfo["id"])
+        txt_path = transcript_dir / f"{vname}.txt"
+        dur = vinfo.get("duration")
+        print(f"{t}[Step 0] 영상: {vinfo.get('title')} ({vinfo.get('uploader') or '-'}"
+              f"{', ' + _format_timestamp(dur) if dur else ''}) → {vname}")
+        if txt_path.exists():
+            print(f"{t}[Step 2] 건너뜀 (이미 존재): {txt_path}")
+            return {"vname": vname, "txt": txt_path}
+
+        track = youtube.pick_caption(vinfo, language, subs)
+        if track:
+            print(f"{t}[Step 2] YouTube 자막 사용: [{youtube.CAPTION_LABELS[track['kind']]}] {track['key']} ({track['name']})")
+            return {"vname": vname, "txt": youtube.save_captions(vinfo, track, transcript_dir, vname, language)}
+        if subs != "off":
+            need = "업로더 자막" if subs == "manual" else "자막"
+            print(f"{t}[Step 2] '{language}' {need}이 없어 음성 인식({ENGINES[engine]['label']})으로 전사합니다.")
+
+        audio_path = audio_dir / f"{vname}.mp3"
+        if audio_path.exists():
+            print(f"{t}[Step 0] 건너뜀 (오디오 이미 존재): {audio_path}")
+        else:
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            tmp = Path(tempfile.mkdtemp(prefix=".yt-", dir=audio_dir))
+            try:
+                raw = youtube.download_audio(vinfo, tmp, progress=n == 1, prefix=t)
+                audio_path = extract_audio(raw, audio_dir, name=vname)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+        return {"vname": vname, "audio": audio_path, "vinfo": vinfo}
+
+    ready: "queue.Queue[dict | None]" = queue.Queue(maxsize=max(1, prefetch))
+
+    def producer() -> None:
+        for i, v in enumerate(videos, 1):
+            try:
+                item = prepare(i, v)
+            except BaseException as e:  # noqa: BLE001 — 스레드가 조용히 죽지 않도록 전부 메인 스레드로 전달
+                item = {"error": e if isinstance(e, Exception) else RuntimeError(repr(e))}
+            ready.put({"i": i, "v": v, **item})
+        ready.put(None)
+
+    threading.Thread(target=producer, name="yt-download", daemon=True).start()
+
+    # 3) 메인 스레드: 전사 (모델 캐시로 한 번만 로드), 요약은 별도 스레드
+    summarizer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="summarize") if summarize_flag else None
+    summaries = []
     results, failed = [], []
-    for i, v in enumerate(videos, 1):
-        if len(videos) > 1:
-            print(f"\n[재생목록 {i}/{len(videos)}] {v['title']}")
+    done = 0
+    while (item := ready.get()) is not None:
+        i, v = item["i"], item["v"]
         try:
-            vinfo = info if len(videos) == 1 and info.get("_type") != "playlist" else youtube.fetch_video(v["url"])
-            vname = name or youtube.make_name(vinfo.get("title"), vinfo["id"])
-            txt_path = transcript_dir / f"{vname}.txt"
-            dur = vinfo.get("duration")
-            print(f"[Step 0] 영상: {vinfo.get('title')} ({vinfo.get('uploader') or '-'}"
-                  f"{', ' + _format_timestamp(dur) if dur else ''}) → {vname}")
-
-            if txt_path.exists():
-                print(f"[Step 2] 건너뜀 (이미 존재): {txt_path}")
-            else:
-                track = youtube.pick_caption(vinfo, language, subs)
-                if track:
-                    print(f"[Step 2] YouTube 자막 사용: [{youtube.CAPTION_LABELS[track['kind']]}] {track['key']} ({track['name']})")
-                    txt_path = youtube.save_captions(vinfo, track, transcript_dir, vname, language)
-                else:
-                    if subs != "off":
-                        need = "업로더 자막" if subs == "manual" else "자막"
-                        print(f"[Step 2] '{language}' {need}이 없어 음성 인식({ENGINES[engine]['label']})으로 전사합니다.")
-                    audio_path = audio_dir / f"{vname}.mp3"
-                    if audio_path.exists():
-                        print(f"[Step 0] 건너뜀 (오디오 이미 존재): {audio_path}")
-                    else:
-                        audio_dir.mkdir(parents=True, exist_ok=True)
-                        tmp = Path(tempfile.mkdtemp(prefix=".yt-", dir=audio_dir))
-                        try:
-                            raw = youtube.download_audio(vinfo, tmp)
-                            audio_path = extract_audio(raw, audio_dir, name=vname)
-                        finally:
-                            shutil.rmtree(tmp, ignore_errors=True)
-                    txt_path = transcribe(audio_path, transcript_dir, vname, language=language, engine=engine)
-                    youtube.tag_transcript(transcript_dir / f"{vname}.json", vinfo)
-
-            if summarize_flag:
-                summarize(txt_path, summary_dir, vname)
+            if "error" in item:
+                raise item["error"]
+            txt_path = item.get("txt")
+            if txt_path is None:
+                if n > 1:
+                    print(f"\n{tag(i)}[Step 2] 전사 시작: {item['vname']}")
+                txt_path = transcribe(item["audio"], transcript_dir, item["vname"], language=language, engine=engine)
+                youtube.tag_transcript(transcript_dir / f"{item['vname']}.json", item["vinfo"])
             results.append(txt_path)
-        except Exception as e:  # noqa: BLE001 — 재생목록에서는 한 영상이 실패해도 계속 진행
-            if len(videos) == 1:
+            if summarizer:
+                summaries.append((v, summarizer.submit(summarize, txt_path, summary_dir, item["vname"])))
+        except Exception as e:  # noqa: BLE001 — 여러 영상이면 한 영상이 실패해도 계속 진행
+            if n == 1:
                 raise
-            print(f"\n[오류] {v['title']}: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"\n{tag(i)}[오류] {v['title']}: {type(e).__name__}: {e}", file=sys.stderr)
             failed.append(v["title"])
+        finally:
+            done += 1
+            if n > 1:
+                print(f"[진행] {done}/{n} 완료", flush=True)
+
+    for v, fut in summaries:
+        try:
+            fut.result()
+        except Exception as e:  # noqa: BLE001
+            if n == 1:
+                raise
+            print(f"\n[오류] 요약 실패 {v['title']}: {type(e).__name__}: {e}", file=sys.stderr)
+            failed.append(f"{v['title']} (요약)")
+    if summarizer:
+        summarizer.shutdown()
 
     if failed:
-        print(f"\n[재생목록] {len(failed)}개 실패: {', '.join(failed)}", file=sys.stderr)
+        print(f"\n[YouTube] {len(failed)}개 실패: {', '.join(failed)}", file=sys.stderr)
         sys.exit(1)
     return results
 
