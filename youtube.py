@@ -73,8 +73,13 @@ def video_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
+def is_safe_folder(folder: str) -> bool:
+    """하위 폴더 이름이 한 단계짜리 안전한 이름인지 (경로 조작 방지)."""
+    return bool(folder) and "/" not in folder and "\\" not in folder and not folder.startswith(".") and len(folder) <= 200
+
+
 def make_name(title: str | None, video_id: str) -> str:
-    """결과 파일명(확장자 제외). 같은 영상은 항상 같은 이름이 되도록 ID를 붙인다."""
+    """결과 파일명(확장자 제외)이나 재생목록 폴더명. 같은 대상은 항상 같은 이름이 되도록 ID를 붙인다."""
     title = sanitize_filename(title or "", restricted=False).strip(" .") or "youtube"
     if len(title) > NAME_MAX_TITLE:
         title = title[:NAME_MAX_TITLE].rstrip() + "…"
@@ -193,15 +198,26 @@ def download_audio(info: dict, dest_dir: Path) -> Path:
         elif d["status"] == "finished":
             print()
 
-    opts = _base_opts() | {
-        "format": "bestaudio/best",
-        "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
-        "progress_hooks": [hook],
-    }
-    # 조회 때 받은 스트림 URL은 다른 세션에서 쓰면 403이 나므로 다운로드 시 새로 추출한다
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        result = ydl.extract_info(video_url(info["id"]), download=True)
-    return Path(result["requested_downloads"][0]["filepath"])
+    # 조회 때 받은 스트림 URL은 다른 세션에서 쓰면 403이 나므로 다운로드 시 새로 추출한다.
+    # YouTube는 같은 포맷도 간헐적으로 403을 주므로, 실패하면 새로 추출해 포맷을 바꿔가며 재시도한다.
+    formats = ["bestaudio/best", "bestaudio[ext=m4a]/bestaudio/best", "bestaudio/best"]
+    for attempt, fmt in enumerate(formats, 1):
+        opts = _base_opts() | {
+            "format": fmt,
+            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
+            "progress_hooks": [hook],
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                result = ydl.extract_info(video_url(info["id"]), download=True)
+            return Path(result["requested_downloads"][0]["filepath"])
+        except yt_dlp.utils.DownloadError as e:
+            if "403" not in str(e) or attempt == len(formats):
+                raise
+            print(f"\n[Step 0] 다운로드 거부(403) — 다시 시도합니다 ({attempt}/{len(formats) - 1})")
+            for p in dest_dir.iterdir():  # 받다 만 조각 정리
+                p.unlink(missing_ok=True)
+    raise AssertionError("unreachable")
 
 
 # ─────────────────────────────────────────────

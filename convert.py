@@ -592,6 +592,11 @@ def main() -> None:
     )
     parser.add_argument("--name", help="--url 결과 파일명(확장자 제외). 생략 시 '영상 제목 [영상ID]'")
     parser.add_argument(
+        "--folder",
+        help="--url 결과를 audio/·transcripts/·summaries/ 아래 이 하위 폴더에 저장. "
+             "재생목록 URL은 생략 시 '재생목록 제목 [재생목록ID]' 폴더를 자동 사용",
+    )
+    parser.add_argument(
         "--gpu",
         type=int,
         default=None,
@@ -613,7 +618,7 @@ def main() -> None:
     # --url: YouTube 영상/재생목록
     if args.url:
         run_youtube(args.url, language=args.language, engine=args.engine, subs=args.subs,
-                    summarize_flag=args.summarize, name=args.name)
+                    summarize_flag=args.summarize, name=args.name, folder=args.folder)
         print("\n완료.")
         return
 
@@ -668,11 +673,21 @@ def run_pipeline(
     summarize_flag: bool = False,
     base_dir: Path | None = None,
 ) -> Path:
-    """파일 1개에 대해 Step 1~3을 실행하고 전사본 경로를 반환한다 (CLI/웹 공용)."""
+    """파일 1개에 대해 Step 1~3을 실행하고 전사본 경로를 반환한다 (CLI/웹 공용).
+
+    입력이 input/ 또는 audio/의 하위 폴더(예: 재생목록 폴더)에 있으면 결과도 같은 이름의 하위 폴더에 저장한다.
+    """
     base_dir = base_dir or Path(__file__).parent
-    audio_dir = base_dir / "audio"
-    transcript_dir = base_dir / "transcripts"
-    summary_dir = base_dir / "summaries"
+    sub = Path()
+    for root in (base_dir / "input", base_dir / "audio"):
+        try:
+            sub = input_path.resolve().parent.relative_to(root.resolve())
+            break
+        except ValueError:
+            continue
+    audio_dir = base_dir / "audio" / sub
+    transcript_dir = base_dir / "transcripts" / sub
+    summary_dir = base_dir / "summaries" / sub
 
     name = input_path.stem
     is_audio = input_path.suffix.lower() in AUDIO_EXTENSIONS
@@ -701,17 +716,19 @@ def run_youtube(
     subs: str = "off",
     summarize_flag: bool = False,
     name: str | None = None,
+    folder: str | None = None,
     base_dir: Path | None = None,
 ) -> list[Path]:
-    """YouTube 영상(또는 재생목록의 각 영상)을 전사하고 전사본 경로 목록을 반환한다."""
+    """YouTube 영상(또는 재생목록의 각 영상)을 전사하고 전사본 경로 목록을 반환한다.
+
+    재생목록이면 결과를 audio/·transcripts/·summaries/ 아래 '재생목록 제목 [재생목록ID]' 폴더에 모은다.
+    folder를 주면 (단일 영상이라도) 그 하위 폴더에 저장한다 — 웹 UI가 재생목록 영상을 하나씩 실행할 때 사용.
+    """
     import shutil
     import tempfile
     import youtube
 
     base_dir = base_dir or Path(__file__).parent
-    audio_dir = base_dir / "audio"
-    transcript_dir = base_dir / "transcripts"
-    summary_dir = base_dir / "summaries"
 
     print(f"[Step 0] YouTube 정보 조회: {url}")
     info = youtube.fetch_info(url)
@@ -720,10 +737,21 @@ def run_youtube(
         if not videos:
             print("[Step 0] 오류: 재생목록에 영상이 없습니다.", file=sys.stderr)
             sys.exit(1)
+        folder = folder or youtube.make_name(info.get("title"), info["id"])
         print(f"[Step 0] 재생목록 '{info.get('title')}' — {len(videos)}개 영상")
         name = None  # 재생목록은 영상별 이름 사용
     else:
         videos = [{"id": info["id"], "url": youtube.video_url(info["id"]), "title": info.get("title")}]
+
+    if folder and not youtube.is_safe_folder(folder):
+        print(f"[Step 0] 오류: 잘못된 폴더명: {folder}", file=sys.stderr)
+        sys.exit(1)
+    sub = Path(folder) if folder else Path()
+    audio_dir = base_dir / "audio" / sub
+    transcript_dir = base_dir / "transcripts" / sub
+    summary_dir = base_dir / "summaries" / sub
+    if folder:
+        print(f"[Step 0] 저장 폴더: {sub}/ (audio/, transcripts/, summaries/ 아래)")
 
     results, failed = [], []
     for i, v in enumerate(videos, 1):
@@ -752,6 +780,7 @@ def run_youtube(
                     if audio_path.exists():
                         print(f"[Step 0] 건너뜀 (오디오 이미 존재): {audio_path}")
                     else:
+                        audio_dir.mkdir(parents=True, exist_ok=True)
                         tmp = Path(tempfile.mkdtemp(prefix=".yt-", dir=audio_dir))
                         try:
                             raw = youtube.download_audio(vinfo, tmp)

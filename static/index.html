@@ -197,6 +197,8 @@ const state = { files: [], selected: new Set(), jobs: [], openLogs: new Set(), c
 const key = (f) => `${f.folder}/${f.name}`;
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// '폴더/파일'이면 폴더 부분을 흐리게 표시
+function fmtName(n) { const i = n.indexOf('/'); return i < 0 ? esc(n) : `<span class="hint">📁 ${esc(n.slice(0, i))}/</span><br>${esc(n.slice(i + 1))}`; }
 function fmtSize(b) { const u = ['B','KB','MB','GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return `${b.toFixed(i ? 1 : 0)} ${u[i]}`; }
 function fmtDur(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m}분 ${s % 60}초` : `${s}초`; }
 async function api(path, opts = {}) {
@@ -253,7 +255,7 @@ function renderFiles() {
     ].join('') || '<span class="chip">미변환</span>';
     return `<tr data-key="${esc(k)}" class="${sel ? '' : 'disabled'}">
       <td><input type="checkbox" ${state.selected.has(k) ? 'checked' : ''} ${sel ? '' : 'disabled title="자막으로 만든 전사본은 원본 파일이 없어 다시 변환하려면 YouTube URL로 추가하세요"'}></td>
-      <td class="name">${esc(f.name)}</td>
+      <td class="name">${fmtName(f.name)}</td>
       <td><span class="chip ${f.folder === 'youtube' ? 'yt-tag' : ''}">${f.folder}/</span></td>
       <td class="num">${f.size == null ? '' : fmtSize(f.size)}</td>
       <td>${res}</td></tr>`;
@@ -334,6 +336,7 @@ function renderYt() {
     html += `<div class="yt-list"><label><input type="checkbox" id="ytAll" ${yt.checked.size === d.videos.length ? 'checked' : ''}><span class="t"><b>전체 선택</b> (${yt.checked.size}/${d.videos.length})</span></label>` +
       d.videos.map(v => `<label><input type="checkbox" data-yt="${esc(v.id)}" ${yt.checked.has(v.id) ? 'checked' : ''}><span class="t">${esc(v.title)}</span>` +
         `${v.has_transcript ? '<span class="chip run">전사됨</span>' : ''}<span class="num hint" style="margin:0">${v.duration ? fmtDur(v.duration) : ''}</span></label>`).join('') + '</div>';
+    html += `<div class="hint">📁 결과는 <code>transcripts/${esc(d.folder)}/</code> 폴더에 모아 저장됩니다 (audio/, summaries/도 같은 폴더명)</div>`;
   }
   $('#ytInfo').innerHTML = html;
   updYtHint();
@@ -377,6 +380,7 @@ $('#ytStart').addEventListener('click', async () => {
   try {
     const r = await api('/api/jobs/youtube', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
       videos, subs: ytSubs(), engine: $('#ytEngine').value, ...commonOpts(),
+      playlist: d.type === 'playlist' ? { id: d.id, title: d.title } : null,
     }) });
     r.created.forEach(id => state.openLogs.add(id));
     yt.data = null; $('#ytResult').hidden = true; $('#ytUrl').value = '';
@@ -438,7 +442,7 @@ async function pollJobsInner() {
       ${j.url ? '<span class="chip yt-tag">YouTube</span>' : ''}
       <span class="fname">${esc(j.filename)}</span>
       ${captionChip(j.caption)}
-      <span class="meta">${esc(how)} · ${j.language} · cuda:${j.gpu}${j.summarize ? ' · 요약' : ''}${dur ? ' · ' + dur : ''}${j.error ? ' · ' + esc(j.error) : ''}</span>
+      <span class="meta">${j.subdir ? `📁 ${esc(j.subdir)} · ` : ''}${esc(how)} · ${j.language} · cuda:${j.gpu}${j.summarize ? ' · 요약' : ''}${dur ? ' · ' + dur : ''}${j.error ? ' · ' + esc(j.error) : ''}</span>
       <span class="actions">
         ${j.status === 'done' ? `<button data-view="txt" data-stem="${esc(stem)}">전사본</button>${j.summarize ? `<button data-view="md" data-stem="${esc(stem)}">요약</button>` : ''}` : ''}
         <button data-log="${j.id}">${state.openLogs.has(j.id) ? '로그 닫기' : '로그'}</button>

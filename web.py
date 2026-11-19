@@ -66,6 +66,7 @@ class Job:
     overwrite: bool
     url: str | None = None      # YouTube 작업이면 영상 URL (folder="youtube", filename=영상 제목)
     name: str | None = None     # YouTube 작업의 결과 파일명(확장자 제외)
+    subdir: str | None = None   # YouTube 재생목록 작업이면 결과를 모을 하위 폴더명
     subs: str = "off"           # YouTube 자막 정책 (youtube.SUBS_POLICIES)
     caption: str | None = None  # 완료 후: 자막으로 만들었으면 manual | auto
     status: str = "queued"  # queued | running | done | error | cancelled
@@ -87,7 +88,10 @@ class Job:
 
     @property
     def stem(self) -> str:
-        return self.name or Path(self.filename).stem
+        """결과 파일 경로(transcripts/ 기준, 확장자 제외). 하위 폴더에 있으면 '폴더/이름'."""
+        if self.name:
+            return f"{self.subdir}/{self.name}" if self.subdir else self.name
+        return str(Path(self.filename).with_suffix(""))
 
     def summary(self) -> dict:
         d = asdict(self)
@@ -121,6 +125,8 @@ def _run_job(job: Job) -> int:
     """
     if job.url:
         source_args = ["--url", job.url, "--name", job.name, "--subs", job.subs]
+        if job.subdir:
+            source_args += ["--folder", job.subdir]
     else:
         input_path = FOLDERS[job.folder] / job.filename
         if not input_path.exists():
@@ -210,10 +216,27 @@ def _worker() -> None:
 app = FastAPI(title="mov-to-txt")
 
 
+def _is_safe_rel(rel: str) -> bool:
+    """'파일' 또는 '하위폴더/파일' 형태만 허용 (재생목록 폴더 한 단계까지, 경로 조작 방지)."""
+    parts = rel.split("/")
+    return 1 <= len(parts) <= 2 and all(p and not p.startswith(".") and "\\" not in p for p in parts)
+
+
+def _iter_rel_files(d: Path, pattern: str = "*"):
+    """d 바로 아래와 하위 폴더 한 단계의 파일을 '이름' / '폴더/이름' 형태로 나열."""
+    for p in sorted(d.glob(pattern), key=lambda p: p.name):
+        if p.is_file() and not p.name.startswith("."):
+            yield p, p.name
+    for sub in sorted((s for s in d.iterdir() if s.is_dir() and not s.name.startswith(".")), key=lambda p: p.name):
+        for p in sorted(sub.glob(pattern), key=lambda p: p.name):
+            if p.is_file() and not p.name.startswith("."):
+                yield p, f"{sub.name}/{p.name}"
+
+
 def _safe_file(folder: str, filename: str) -> Path:
     if folder not in FOLDERS:
         raise HTTPException(400, "잘못된 폴더")
-    if "/" in filename or "\\" in filename or filename.startswith("."):
+    if not _is_safe_rel(filename):
         raise HTTPException(400, "잘못된 파일명")
     path = FOLDERS[folder] / filename
     if not path.is_file():
@@ -245,17 +268,16 @@ def list_files():
     for folder, d in FOLDERS.items():
         if not d.exists():
             continue
-        for f in sorted(d.iterdir(), key=lambda p: p.name):
-            if not f.is_file() or f.name.startswith("."):
-                continue
-            outs = _output_paths(f.stem)
+        for f, rel in _iter_rel_files(d):
+            stem = rel[: -len(f.suffix)] if f.suffix else rel
+            outs = _output_paths(stem)
             st = f.stat()
-            stems.add(f.stem)
+            stems.add(stem)
             has_txt = outs["txt"].exists()
             result.append({
                 "folder": folder,
-                "name": f.name,
-                "stem": f.stem,
+                "name": rel,
+                "stem": stem,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "is_audio": f.suffix.lower() in convert.AUDIO_EXTENSIONS,
@@ -265,19 +287,20 @@ def list_files():
             })
     # YouTube 자막으로 만든 전사본은 원본 파일이 없으므로 따로 표시 (변환 대상으로 선택 불가)
     if TRANSCRIPT_DIR.exists():
-        for t in sorted(TRANSCRIPT_DIR.glob("*.txt"), key=lambda p: p.name):
-            if t.stem in stems or not (caption := youtube.read_caption_kind(t)):
+        for t, rel in _iter_rel_files(TRANSCRIPT_DIR, "*.txt"):
+            stem = rel[: -len(".txt")]
+            if stem in stems or not (caption := youtube.read_caption_kind(t)):
                 continue
             st = t.stat()
             result.append({
                 "folder": "youtube",
-                "name": t.stem,
-                "stem": t.stem,
+                "name": stem,
+                "stem": stem,
                 "size": None,
                 "mtime": st.st_mtime,
                 "is_audio": False,
                 "has_transcript": True,
-                "has_summary": _output_paths(t.stem)["md"].exists(),
+                "has_summary": _output_paths(stem)["md"].exists(),
                 "caption": caption,
                 "selectable": False,
             })
@@ -336,7 +359,7 @@ def create_jobs(req: JobRequest):
         job = Job(
             id=uuid.uuid4().hex[:8],
             folder=f["folder"],
-            filename=path.name,
+            filename=path.relative_to(FOLDERS[f["folder"]]).as_posix(),  # 하위 폴더 포함
             engine=req.engine,
             language=req.language,
             summarize=req.summarize,
@@ -361,20 +384,24 @@ def youtube_info(url: str):
         msg = str(e).replace("ERROR: ", "")
         raise HTTPException(400, f"영상 정보를 가져오지 못했습니다: {msg}")
 
-    def entry(vid: str, title: str | None, **extra) -> dict:
+    def entry(vid: str, title: str | None, folder: str | None = None, **extra) -> dict:
         name = youtube.make_name(title, vid)
+        stem = f"{folder}/{name}" if folder else name
         return {"id": vid, "url": youtube.video_url(vid), "title": title or vid, "name": name,
-                "has_transcript": _output_paths(name)["txt"].exists(), **extra}
+                "has_transcript": _output_paths(stem)["txt"].exists(), **extra}
 
     if info.get("_type") == "playlist":
         videos = youtube.playlist_videos(info)
         if not videos:
             raise HTTPException(400, "재생목록에 영상이 없습니다")
+        folder = youtube.make_name(info.get("title"), info["id"])
         return {
             "type": "playlist",
+            "id": info["id"],
             "title": info.get("title"),
+            "folder": folder,  # 결과를 모을 하위 폴더 (audio/·transcripts/·summaries/ 아래)
             "uploader": info.get("uploader") or info.get("channel"),
-            "videos": [entry(v["id"], v["title"], duration=v["duration"]) for v in videos],
+            "videos": [entry(v["id"], v["title"], folder, duration=v["duration"]) for v in videos],
         }
     tracks = [t for t in youtube.caption_tracks(info) if t["lang"] in ("ko", "en")]
     return {
@@ -389,6 +416,7 @@ def youtube_info(url: str):
 
 class YoutubeJobRequest(BaseModel):
     videos: list[dict]  # [{url, title, name}] — /api/youtube/info 응답의 videos 항목
+    playlist: dict | None = None  # {id, title} — 지정 시 결과를 재생목록 폴더에 모음
     engine: str = convert.DEFAULT_ENGINE
     subs: str = "off"
     language: str = "ko"
@@ -402,6 +430,13 @@ def create_youtube_jobs(req: YoutubeJobRequest):
     _validate_options(req.engine, req.language, req.gpu)
     if req.subs not in youtube.SUBS_POLICIES:
         raise HTTPException(400, "잘못된 자막 옵션")
+    subdir = None
+    if req.playlist:
+        pid = str(req.playlist.get("id", ""))
+        if not re.fullmatch(r"[\w-]{2,64}", pid):
+            raise HTTPException(400, "잘못된 재생목록 ID")
+        # 폴더명도 클라이언트 값 대신 서버에서 계산 (경로 조작 방지)
+        subdir = youtube.make_name(str(req.playlist.get("title") or ""), pid)
     created = []
     for v in req.videos:
         url, title = str(v.get("url", "")), str(v.get("title") or "")
@@ -413,6 +448,7 @@ def create_youtube_jobs(req: YoutubeJobRequest):
             folder="youtube",
             filename=title or m.group(1),
             name=youtube.make_name(title, m.group(1)),  # 클라이언트 값 대신 서버에서 다시 계산 (경로 조작 방지)
+            subdir=subdir,
             url=url,
             subs=req.subs,
             engine=req.engine,
@@ -463,9 +499,9 @@ def cancel_or_remove(job_id: str):
     return {"ok": True}
 
 
-@app.get("/api/result/{kind}/{stem}")
+@app.get("/api/result/{kind}/{stem:path}")
 def get_result(kind: str, stem: str, download: bool = False):
-    if kind not in ("txt", "json", "md") or "/" in stem or "\\" in stem or stem.startswith("."):
+    if kind not in ("txt", "json", "md") or not _is_safe_rel(stem):
         raise HTTPException(400)
     path = _output_paths(stem)[kind]
     if not path.exists():

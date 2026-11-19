@@ -96,7 +96,7 @@ CLI에서는 `--url`을 씁니다.
 uv run convert.py --url "https://youtu.be/VIDEO_ID"                 # 오디오 다운로드 → Qwen3-ASR 전사
 uv run convert.py --url "https://youtu.be/VIDEO_ID" --subs manual   # 업로더 자막 우선, 없으면 음성 인식
 uv run convert.py --url "https://youtu.be/VIDEO_ID" --subs any      # 자동 생성 자막까지 허용
-uv run convert.py --url "https://www.youtube.com/playlist?list=..." --language en --summarize
+uv run convert.py --url "https://www.youtube.com/playlist?list=..." --language en --summarize   # → transcripts/<재생목록 제목 [ID]>/
 ```
 
 | `--subs` | 동작 |
@@ -106,6 +106,8 @@ uv run convert.py --url "https://www.youtube.com/playlist?list=..." --language e
 | `any` | 업로더 자막 → 없으면 **YouTube 자동 생성 자막** → 없으면 음성 인식 |
 
 - 결과 파일명은 `영상 제목 [영상ID]`이며, 이미 전사된 영상은 건너뜁니다. 오디오는 `audio/`에 MP3로 저장됩니다.
+- **재생목록**은 결과를 `audio/`·`transcripts/`·`summaries/` 아래 `재생목록 제목 [재생목록ID]/` 폴더에 모아 저장합니다. 단일 영상도 `--folder 폴더명`으로 원하는 하위 폴더에 넣을 수 있습니다.
+  하위 폴더의 오디오를 웹 UI에서 다시 변환하면 결과도 같은 하위 폴더에 저장됩니다.
 - 자막으로 만든 전사본은 TXT 두 번째 줄에 `# 출처: YouTube 자막 [업로더]` 또는 `[자동 생성]`이 표기되고, 웹 UI 파일 목록과 작업 목록에도 `자막·업로더` / `자막·자동 생성` 칩으로 구분됩니다. JSON에는 `source` 필드로 영상 정보가 기록됩니다.
 - 다른 언어에서 **번역된 자막**(업로더 번역본, 자동 번역)은 실제 발화가 아니므로 사용하지 않습니다. 웹 UI에는 "번역본 · 사용 안 함"으로만 표시됩니다.
 - 자동 생성 자막은 문장 부호가 없어 최대 15초 단위로 이어 붙여 저장합니다.
