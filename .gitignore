@@ -30,6 +30,7 @@ build/
 .env
 .env.*
 !.env.example
+.web-token
 
 # =============================================================
 # ML model cache (large, downloaded at runtime)

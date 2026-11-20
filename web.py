@@ -2,12 +2,20 @@
 mov-to-txt 웹 UI
 
 사용법:
-    uv run web.py                      # http://127.0.0.1:8000
-    uv run web.py --host 0.0.0.0 --port 8080
+    uv run web.py                      # http://127.0.0.1:8000/?token=...
+    uv run web.py --port 8080
+    uv run web.py --new-token          # 접속 토큰 재발급 (기존 브라우저 로그인 무효화)
 
 브라우저에서 파일 선택/업로드 → 엔진·언어·GPU·요약 옵션 선택 → 작업 큐에 추가.
 작업은 GPU 메모리 충돌을 피하기 위해 한 번에 하나씩 순차 실행되며,
 각 작업은 별도 프로세스로 실행되어 종료 시 GPU 메모리가 완전히 해제됩니다.
+
+보안:
+  - 루프백 주소(127.0.0.1 / ::1)에만 바인드한다. 원격 접속은 VS Code 포트 포워딩이나 ssh -L로.
+  - 같은 서버의 다른 사용자도 루프백에는 접속할 수 있으므로 토큰으로 인증한다.
+    토큰은 .web-token(권한 600)에 저장되고, 시작 시 출력되는 '?token=' 주소로 한 번 접속하면 쿠키로 유지된다.
+  - Host 헤더는 localhost/127.0.0.1/[::1]만 허용(DNS 리바인딩 차단),
+    쓰기 요청은 Origin이 자기 자신일 때만 허용(다른 사이트·다른 localhost 포트발 CSRF 차단).
 """
 
 import os
@@ -17,12 +25,15 @@ os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 import argparse
 import codecs
+import ipaddress
 import queue
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -31,8 +42,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, PlainTextResponse
+from urllib.parse import urlsplit
+
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
 import convert
@@ -48,6 +61,12 @@ STATIC_DIR = BASE_DIR / "static"
 
 FOLDERS = {"input": INPUT_DIR, "audio": AUDIO_DIR}
 MAX_LOG_CHARS = 200_000
+
+TOKEN_FILE = BASE_DIR / ".web-token"
+TOKEN_COOKIE = "movtotxt_token"
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+MAX_UPLOAD_BYTES = 20 * 1024**3   # 업로드 요청 하나의 최대 크기
+MIN_FREE_BYTES = 5 * 1024**3      # 업로드 후에도 남겨 둘 디스크 여유 공간
 PROGRESS_RE = re.compile(r"\[진행\] (\d+)/(\d+) 완료")
 
 
@@ -235,7 +254,99 @@ def _worker() -> None:
 # API
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="mov-to-txt")
+app = FastAPI(title="mov-to-txt", docs_url=None, redoc_url=None, openapi_url=None)
+
+_token: str | None = None
+
+
+def load_token(regenerate: bool = False) -> str:
+    """접속 토큰을 .web-token에서 읽고, 없거나 재발급이면 새로 만들어 권한 600으로 저장한다."""
+    global _token
+    if not regenerate and TOKEN_FILE.exists():
+        tok = TOKEN_FILE.read_text().strip()
+        if len(tok) >= 32:
+            TOKEN_FILE.chmod(0o600)
+            _token = tok
+            return tok
+    tok = secrets.token_urlsafe(32)
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(tok + "\n")
+    TOKEN_FILE.chmod(0o600)
+    _token = tok
+    return tok
+
+
+def _token_ok(value: str | None) -> bool:
+    tok = _token or load_token()
+    return bool(value) and secrets.compare_digest(value.encode(), tok.encode())
+
+
+def _is_authed(request: Request) -> bool:
+    auth = request.headers.get("authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+    return _token_ok(request.cookies.get(TOKEN_COOKIE)) or _token_ok(bearer)
+
+
+def _host_name(host: str) -> str | None:
+    try:
+        return urlsplit(f"//{host}").hostname
+    except ValueError:
+        return None
+
+
+LOGIN_PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>mov-to-txt 로그인</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.6}}
+input{{width:100%;padding:.5rem;font:inherit;box-sizing:border-box}}button{{margin-top:.5rem;padding:.4rem 1rem;font:inherit}}
+code{{background:#8882;padding:0 .3em;border-radius:3px}}.err{{color:#c33}}</style></head><body>
+<h2>mov-to-txt</h2>{error}
+<p>서버를 실행한 터미널에 출력된 <code>?token=</code> 주소로 접속하거나, 아래에 토큰을 붙여넣으세요.
+토큰은 프로젝트 폴더의 <code>.web-token</code> 파일에도 있습니다.</p>
+<form method="get" action="/"><input name="token" type="password" autocomplete="off" autofocus placeholder="접속 토큰">
+<button>접속</button></form></body></html>"""
+
+
+@app.middleware("http")
+async def security_gate(request: Request, call_next):
+    # 1) Host 헤더: 루프백 이름만 허용 → DNS 리바인딩으로 다른 도메인이 이 서버를 가리켜도 거부
+    host = request.headers.get("host", "")
+    if _host_name(host) not in LOOPBACK_HOSTS:
+        return PlainTextResponse("허용되지 않은 Host", status_code=421)
+
+    # 2) 쓰기 요청: Origin이 있으면 자기 자신이어야 함 → 다른 사이트/다른 localhost 포트발 CSRF 거부
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin is not None and urlsplit(origin).netloc.lower() != host.lower():
+            return JSONResponse({"detail": "다른 출처의 요청은 허용되지 않습니다"}, status_code=403)
+
+    # 3) 토큰 인증 (쿠키 또는 Authorization: Bearer)
+    if request.url.path == "/" and "token" in request.query_params:
+        if not _token_ok(request.query_params["token"]):
+            return HTMLResponse(LOGIN_PAGE.format(error='<p class="err">토큰이 올바르지 않습니다.</p>'), status_code=401)
+        resp = RedirectResponse("/", status_code=303)  # 주소창·기록에서 토큰 제거
+        resp.set_cookie(TOKEN_COOKIE, request.query_params["token"], httponly=True, samesite="strict",
+                        max_age=60 * 60 * 24 * 365, path="/")
+        return resp
+    if not _is_authed(request):
+        if request.url.path == "/":
+            return HTMLResponse(LOGIN_PAGE.format(error=""), status_code=401)
+        return JSONResponse({"detail": "인증이 필요합니다. 서버 터미널에 출력된 주소로 다시 접속하세요."}, status_code=401)
+
+    # 4) 업로드 크기: 본문을 임시 파일로 받기 전에 Content-Length로 미리 거부
+    if request.url.path == "/api/upload" and request.method == "POST":
+        try:
+            size = int(request.headers["content-length"])
+        except (KeyError, ValueError):
+            return JSONResponse({"detail": "Content-Length가 필요합니다"}, status_code=411)
+        if size > MAX_UPLOAD_BYTES:
+            return JSONResponse({"detail": f"업로드는 한 번에 {MAX_UPLOAD_BYTES // 1024**3}GB까지 가능합니다"}, status_code=413)
+        # 업로드 본문은 먼저 시스템 임시 폴더에 쌓였다가 input/·audio/로 복사되므로 둘 다 확인
+        free = min(shutil.disk_usage(BASE_DIR).free, shutil.disk_usage(tempfile.gettempdir()).free)
+        if free - size < MIN_FREE_BYTES:
+            return JSONResponse({"detail": f"디스크 여유 공간이 부족합니다 (업로드 후 {MIN_FREE_BYTES // 1024**3}GB 이상 남아야 함)"},
+                                status_code=507)
+    return await call_next(request)
 
 
 def _is_safe_rel(rel: str) -> bool:
@@ -339,11 +450,33 @@ async def upload(files: list[UploadFile] = File(...)):
         is_audio = Path(name).suffix.lower() in convert.AUDIO_EXTENSIONS
         dest_dir = AUDIO_DIR if is_audio else INPUT_DIR
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / name
-        with dest.open("wb") as out:
-            shutil.copyfileobj(uf.file, out, length=1024 * 1024)
-        saved.append({"folder": "audio" if is_audio else "input", "name": name})
+        # 숨김 임시 파일에 다 쓴 뒤, 기존 파일을 덮어쓰지 않는 이름으로 옮긴다
+        tmp = dest_dir / f".upload-{uuid.uuid4().hex}"
+        try:
+            with tmp.open("wb") as out:
+                shutil.copyfileobj(uf.file, out, length=1024 * 1024)
+            dest = _link_unique(tmp, dest_dir, name)
+        finally:
+            tmp.unlink(missing_ok=True)
+        saved.append({"folder": "audio" if is_audio else "input", "name": dest.name,
+                      **({"renamed_from": name} if dest.name != name else {})})
     return {"saved": saved}
+
+
+def _link_unique(src: Path, dest_dir: Path, name: str) -> Path:
+    """src를 dest_dir/name에 하드링크한다. 이미 있으면 'name (2).ext'처럼 비어 있는 이름을 쓴다.
+
+    os.link는 대상이 있으면 실패하므로, 동시에 같은 이름을 올려도 서로 덮어쓰지 않는다.
+    """
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for n in range(1, 1000):
+        dest = dest_dir / (name if n == 1 else f"{stem} ({n}){suffix}")
+        try:
+            os.link(src, dest)
+            return dest
+        except FileExistsError:
+            continue
+    raise HTTPException(409, f"같은 이름의 파일이 너무 많습니다: {name}")
 
 
 class JobRequest(BaseModel):
@@ -566,16 +699,30 @@ def get_result(kind: str, stem: str, download: bool = False):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="mov-to-txt 웹 UI")
-    parser.add_argument("--host", default="127.0.0.1", help="바인드 주소 (기본: 127.0.0.1, 외부 접속은 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="바인드 주소 — 루프백(127.0.0.1, ::1)만 허용. 원격 접속은 VS Code 포트 포워딩이나 ssh -L로")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--new-token", action="store_true", help="접속 토큰 재발급 (기존 브라우저 로그인 무효화)")
     args = parser.parse_args()
+
+    try:
+        loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        parser.error(f"--host {args.host}: 루프백 주소(127.0.0.1, ::1)만 사용할 수 있습니다. "
+                     "외부에서 접속하려면 VS Code 포트 포워딩이나 'ssh -L 8000:localhost:8000 서버'를 쓰세요.")
 
     for d in (INPUT_DIR, AUDIO_DIR, TRANSCRIPT_DIR, SUMMARY_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    token = load_token(regenerate=args.new_token)
 
     threading.Thread(target=_worker, daemon=True).start()
 
-    print(f"mov-to-txt 웹 UI: http://{args.host}:{args.port}", flush=True)
+    shown = f"[{args.host}]" if ":" in args.host else args.host
+    print(f"mov-to-txt 웹 UI: http://{shown}:{args.port}/?token={token}", flush=True)
+    print("  (VS Code 터미널에서는 위 주소를 클릭하면 포트 포워딩과 함께 열립니다. "
+          "토큰은 .web-token에 저장되어 재시작해도 유지됩니다)", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

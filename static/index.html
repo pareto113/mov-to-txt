@@ -203,6 +203,7 @@ function fmtSize(b) { const u = ['B','KB','MB','GB']; let i = 0; while (b >= 102
 function fmtDur(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m}분 ${s % 60}초` : `${s}초`; }
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = '/'; throw new Error('인증이 필요합니다'); }  // 토큰 재발급 등 → 로그인 화면
   if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).detail || msg; } catch {} throw new Error(msg); }
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
 }
@@ -296,8 +297,15 @@ function upload(fileList) {
   xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.firstElementChild.style.width = `${e.loaded / e.total * 100}%`; };
   xhr.onloadend = async () => {
     prog.style.display = 'none'; prog.firstElementChild.style.width = '0';
-    if (xhr.status !== 200) return alert('업로드 실패: ' + xhr.statusText);
-    for (const s of JSON.parse(xhr.responseText).saved) state.selected.add(`${s.folder}/${s.name}`);
+    if (xhr.status === 401) { location.href = '/'; return; }
+    if (xhr.status !== 200) {
+      let msg = xhr.statusText; try { msg = JSON.parse(xhr.responseText).detail || msg; } catch {}
+      return alert('업로드 실패: ' + msg);
+    }
+    const saved = JSON.parse(xhr.responseText).saved;
+    for (const s of saved) state.selected.add(`${s.folder}/${s.name}`);
+    const renamed = saved.filter(s => s.renamed_from);
+    if (renamed.length) alert('같은 이름의 파일이 있어 이름을 바꿔 저장했습니다:\n' + renamed.map(s => `${s.renamed_from} → ${s.name}`).join('\n'));
     loadFiles();
   };
   xhr.open('POST', '/api/upload'); xhr.send(fd);
